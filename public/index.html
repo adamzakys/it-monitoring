@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BMS IT Monitoring - Network Operations Center</title>
+  <meta name="description" content="BMS IT Monitoring - Real-time network monitoring and observability platform for enterprise NOC operations.">
+  <meta name="application-name" content="BMS IT Monitoring">
+  <link rel="icon" type="image/png" href="/images/Logo-Berlian-Manyar-Sejahtera.png">
+  <link rel="stylesheet" href="/css/output.css">
+  <link rel="stylesheet" href="/css/style.css">
+  <!-- Chart.js for high-performance canvas rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+  <div id="app-container">
+
+    <!-- ZONA 1: LEFT SIDEBAR NAVIGATION -->
+    <aside class="sidebar-left">
+      <div>
+        <div class="brand-header">
+          <div class="brand-icon">
+            <img src="/images/Logo-Berlian-Manyar-Sejahtera.png" alt="BMS IT Monitoring logo" />
+          </div>
+          <div class="brand-title">BMS IT Monitoring</div>
+          <div class="brand-subtitle">PT. Berlian Manyar Sejahtera</div>
+        </div>
+
+        <ul class="nav-menu">
+          <li class="nav-item active" data-view="dashboard" id="nav-dashboard">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            Dashboard
+          </li>
+          <li class="nav-item" data-view="devices" id="nav-devices">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+            Devices
+          </li>
+          <li class="nav-item" data-view="map" id="nav-map">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>
+            Map
+          </li>
+          <li class="nav-item" data-view="alerts" id="nav-alerts">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+            Alerts
+            <span class="nav-badge" id="nav-alert-counter">0</span>
+          </li>
+          <li class="nav-item" data-view="reports" id="nav-reports">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+            Reports
+          </li>
+          <li class="nav-item" data-view="settings" id="nav-settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            Settings
+          </li>
+        </ul>
+      </div>
+
+      <!-- User Profile & Session Panel -->
+      <div class="user-panel">
+        <div class="user-avatar">AD</div>
+        <div class="user-info">
+          <div class="user-name">Network Admin</div>
+          <div class="user-role">Superuser • NOC Operator</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN VIEWPORT (ZONES 2, 3, 4) -->
+    <main class="main-viewport">
+      <button class="btn-floating-expand" id="btn-expand-sidebar" title="Open Event Stream">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        Live Feed (<span id="floating-alert-count">0</span>)
+      </button>
+
+      <!-- ZONA 2: HEADER & KPI METRIC SUMMARY -->
+      <header class="main-header">
+        <div class="header-topbar">
+          <div class="page-titles">
+            <h1 id="view-title">Network Operations Center Overview</h1>
+            <p id="view-subtitle">Dynamic multi-router telemetry stream & auto-discovery matrix (1s resolution)</p>
+          </div>
+
+          <div class="header-indicators">
+            <!-- 30-day uptime with sparkline -->
+            <div class="uptime-badge-group">
+              <span class="uptime-label">30-Day SLA Uptime</span>
+              <span class="uptime-value" id="uptime-text">--</span>
+              <svg class="sparkline-svg" id="sparkline-container" viewBox="0 0 60 20" preserveAspectRatio="none">
+                <polyline id="sparkline-polyline" fill="none" stroke="#10b981" stroke-width="1.8" points="" />
+              </svg>
+            </div>
+
+            <!-- WebSocket Live Connection State Indicator -->
+            <div class="connection-state-pill" id="ws-status-pill">
+              <span class="pulse-dot"></span>
+              <span id="ws-status-text">Connecting…</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4 KPI Counter Cards -->
+        <div class="kpi-grid">
+          <div class="kpi-card total">
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+            </div>
+            <div class="kpi-info">
+              <span class="kpi-label">Total Devices</span>
+              <span class="kpi-number" id="kpi-total">0</span>
+              <span class="kpi-desc">All monitored devices</span>
+            </div>
+          </div>
+
+          <div class="kpi-card online">
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+            </div>
+            <div class="kpi-info">
+              <span class="kpi-label">Online Nodes</span>
+              <span class="kpi-number" id="kpi-online">0</span>
+              <span class="kpi-desc" id="kpi-online-desc">Operational</span>
+            </div>
+          </div>
+
+          <div class="kpi-card warning">
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+            </div>
+            <div class="kpi-info">
+              <span class="kpi-label">Degraded / Warning</span>
+              <span class="kpi-number" id="kpi-warning">0</span>
+              <span class="kpi-desc">No issues detected</span>
+            </div>
+          </div>
+
+          <div class="kpi-card offline">
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+            </div>
+            <div class="kpi-info">
+              <span class="kpi-label">Offline / Timeout</span>
+              <span class="kpi-number" id="kpi-offline">0</span>
+              <span class="kpi-desc">All systems operational</span>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- SCROLLABLE WORKSPACE FOR CONTENT VIEWS -->
+      <div class="content-workspace" id="dashboard-view-panel">
+
+        <!-- ZONA 3: CENTER STAGE: DEVICE GRID & MONITORING MATRIX -->
+        <section class="device-matrix-section">
+          <div class="section-header">
+            <div class="section-title-group">
+              <h2 class="section-title">Active Device Inventory &amp; Node Matrix</h2>
+              <span class="section-title-sub">100% nodes are reachable</span>
+            </div>
+
+            <div class="device-filter-bar">
+              <div class="search-input-wrap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input type="text" id="device-search" class="search-input" placeholder="Filter by name or IP...">
+              </div>
+
+              <div class="btn-filter-group">
+                <button class="btn-filter active" data-filter="all">All</button>
+                <button class="btn-filter" data-filter="online">Online</button>
+                <button class="btn-filter" data-filter="warning">Warning</button>
+                <button class="btn-filter" data-filter="offline">Offline</button>
+              </div>
+
+              <button class="btn-action" id="btn-open-add-device">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                Add Device
+              </button>
+            </div>
+          </div>
+
+          <!-- Dynamic Node Cards Grid -->
+          <div class="device-matrix-grid" id="device-cards-grid">
+            <!-- Rendered dynamically by app.js -->
+          </div>
+        </section>
+
+        <!-- ZONA 4: PERFORMANCE & DISTRIBUTION ANALYTICS -->
+        <section class="analytics-grid">
+          <!-- 1. Network Traffic Dual-Line Area Chart -->
+          <div class="analytics-card">
+            <div class="analytics-header">
+              <div class="chart-title-group">
+                <h3 id="traffic-chart-title">Real-Time Throughput Stream: MikroTik CHR (Lab Router)</h3>
+                <span id="traffic-chart-subtitle">Sliding window 60s @ 1s frequency</span>
+              </div>
+
+              <div class="chart-controls">
+                <select class="select-interface" id="chart-interface-select">
+                  <option value="ether1">ether1</option>
+                </select>
+
+                <div class="chart-legend-custom">
+                  <div class="legend-item">
+                    <span class="legend-bar in"></span>
+                    <span>Inbound (Download): <strong id="live-in-rate">0.00 Mbps</strong></span>
+                  </div>
+                  <div class="legend-item">
+                    <span class="legend-bar out"></span>
+                    <span>Outbound (Upload): <strong id="live-out-rate">0.00 Mbps</strong></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="chart-canvas-wrap">
+              <canvas id="trafficAreaChart"></canvas>
+            </div>
+          </div>
+
+          <!-- 2. Device Status Donut Chart -->
+          <div class="analytics-card">
+            <div class="analytics-header">
+              <div class="chart-title-group">
+                <h3>Availability Distribution</h3>
+                <span>Inventory health state</span>
+              </div>
+            </div>
+
+            <div class="donut-center-container">
+              <canvas id="statusDonutChart"></canvas>
+              <div class="donut-center-text">
+                <div class="donut-center-number" id="donut-total-count">0</div>
+                <div class="donut-center-label">Monitored</div>
+              </div>
+            </div>
+
+            <div class="donut-legend">
+              <div class="donut-legend-item">
+                <span class="donut-legend-dot online"></span>
+                <span>Online (<span id="donut-online-count">0</span>)</span>
+              </div>
+              <div class="donut-legend-item">
+                <span class="donut-legend-dot warning"></span>
+                <span>Warning (<span id="donut-warning-count">0</span>)</span>
+              </div>
+              <div class="donut-legend-item">
+                <span class="donut-legend-dot offline"></span>
+                <span>Offline (<span id="donut-offline-count">0</span>)</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- ALTERNATIVE TAB PANELS (Devices, Map, Alerts, Reports, Settings) -->
+      <div class="content-workspace" id="other-view-panel" style="display: none;">
+        <!-- Injected dynamically on tab switch -->
+      </div>
+    </main>
+
+    <!-- ZONA 5: RIGHT SIDEBAR: REAL-TIME EVENT STREAM -->
+    <aside class="sidebar-right" id="sidebar-right">
+      <div class="stream-header">
+        <div class="stream-title-group">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+          <span class="stream-title">Live Incident Stream</span>
+          <span class="stream-count-badge" id="stream-badge-count">2</span>
+        </div>
+
+        <div class="stream-actions">
+          <button class="btn-toggle-sidebar" id="btn-collapse-sidebar" title="Collapse Feed">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Stream Log List -->
+      <div class="stream-list" id="stream-log-container">
+        <!-- Rendered dynamically by app.js -->
+      </div>
+
+      <div class="stream-footer">
+        <a href="#" id="link-view-all-alerts">View Full Incident Log &rarr;</a>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- MODAL: ADD / EDIT DEVICE (CRUD & TELEGRAF GENERATOR) -->
+  <div class="modal-backdrop" id="modal-device">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title" id="modal-device-title">Add New Network Device</div>
+        <button class="modal-close" id="modal-device-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="input-dev-name">Device Name / Label</label>
+          <input type="text" id="input-dev-name" class="form-control" placeholder="e.g. MikroTik CHR - Edge 01" required>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="input-dev-ip">IP Address / Host</label>
+            <input type="text" id="input-dev-ip" class="form-control" placeholder="192.168.100.1" required>
+          </div>
+          <div class="form-group">
+            <label for="input-dev-type">Device Type</label>
+            <select id="input-dev-type" class="form-control">
+              <option value="router">MikroTik Router</option>
+              <option value="switch">Managed Switch</option>
+              <option value="server">Linux / Server</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="input-dev-community">SNMP Community</label>
+            <input type="text" id="input-dev-community" class="form-control" value="public">
+          </div>
+          <div class="form-group">
+            <label for="input-dev-port">SNMP Port</label>
+            <input type="number" id="input-dev-port" class="form-control" value="161">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="input-dev-interval">Polling Frequency</label>
+          <select id="input-dev-interval" class="form-control">
+            <option value="1">1 Second (Real-Time Ultra)</option>
+            <option value="2">2 Seconds</option>
+            <option value="5">5 Seconds</option>
+          </select>
+        </div>
+
+        <div id="test-connection-result" style="display:none; padding:10px; border-radius:6px; font-size:0.75rem;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="btn-test-connection">Test ICMP & SNMP</button>
+        <button class="btn-action" id="btn-save-device">Deploy & Reload Telegraf</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: DEVICE DEEP-DIVE OVERLAY (Detail panel) -->
+  <div class="deeplink-backdrop" id="device-detail-backdrop">
+    <div class="deeplink-panel" id="device-detail-panel">
+      <div class="deeplink-header">
+        <div class="deeplink-header-info">
+          <button class="deeplink-back-btn" id="btn-device-detail-close" title="Back to dashboard">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"></polyline></svg>
+          </button>
+          <div>
+            <h2 id="detail-device-name">Loading…</h2>
+            <div class="deeplink-meta">
+              <span id="detail-device-ip">--</span>
+              <span class="deeplink-meta-sep">•</span>
+              <span id="detail-device-type">--</span>
+              <span class="deeplink-meta-sep">•</span>
+              <span class="status-pill" id="detail-device-status">--</span>
+            </div>
+          </div>
+        </div>
+        <button class="deeplink-close-x" id="btn-device-detail-x" title="Close">&times;</button>
+      </div>
+
+      <div class="deeplink-body" id="device-detail-body">
+        <!-- SECTION 1: Traffic & Interfaces -->
+        <section class="deeplink-section">
+          <div class="deeplink-section-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            <h3>Traffic & Interface Throughput</h3>
+            <span class="deeplink-hint">Sliding 5-minute window per-interface</span>
+          </div>
+
+          <div class="deeplink-grid-2">
+            <div class="deeplink-card">
+              <div class="deeplink-card-header">
+                <h4>Throughput History (5m)</h4>
+                <select id="detail-interface-select" class="select-interface"></select>
+              </div>
+              <div class="chart-canvas-wrap" style="min-height: 200px;">
+                <canvas id="detailThroughputChart"></canvas>
+              </div>
+            </div>
+
+            <div class="deeplink-card">
+              <div class="deeplink-card-header">
+                <h4>Interface Status Table</h4>
+                <span class="deeplink-hint" id="detail-iface-count">-- interfaces</span>
+              </div>
+              <div class="deeplink-table-wrap">
+                <table class="deeplink-table">
+                  <thead>
+                    <tr>
+                      <th>Interface</th>
+                      <th>Status</th>
+                      <th>Speed</th>
+                      <th>PPS In</th>
+                      <th>PPS Out</th>
+                      <th>Err In</th>
+                      <th>Err Out</th>
+                    </tr>
+                  </thead>
+                  <tbody id="detail-iface-tbody">
+                      <tr><td colspan="7" style="text-align:center; padding:20px; color:var(--text-muted);">Loading…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- SECTION 2: Network Quality -->
+        <section class="deeplink-section">
+          <div class="deeplink-section-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+            <h3>Network Quality (RTT, Jitter, Packet Loss)</h3>
+            <span class="deeplink-hint">5-minute ICMP history @ 5s resolution</span>
+          </div>
+
+          <div class="deeplink-grid-2">
+            <div class="deeplink-card">
+              <div class="deeplink-card-header">
+                <h4>Round-Trip Time (ms)</h4>
+                <div class="deeplink-legend">
+                  <span class="legend-dot min"></span>min
+                  <span class="legend-dot avg"></span>avg
+                  <span class="legend-dot max"></span>max
+                </div>
+              </div>
+              <div class="chart-canvas-wrap" style="min-height: 200px;">
+                <canvas id="detailRttChart"></canvas>
+              </div>
+              <div class="deeplink-mini-stats" id="detail-rtt-stats">
+                <div><span>Avg</span><strong id="detail-rtt-avg">-- ms</strong></div>
+                <div><span>Min</span><strong id="detail-rtt-min">-- ms</strong></div>
+                <div><span>Max</span><strong id="detail-rtt-max">-- ms</strong></div>
+                <div><span>Jitter</span><strong id="detail-rtt-jitter">-- ms</strong></div>
+              </div>
+            </div>
+
+            <div class="deeplink-card">
+              <div class="deeplink-card-header">
+                <h4>Packet Loss (%)</h4>
+                <span class="deeplink-hint">5s aggregated mean</span>
+              </div>
+              <div class="chart-canvas-wrap" style="min-height: 200px;">
+                <canvas id="detailLossChart"></canvas>
+              </div>
+              <div class="deeplink-mini-stats" id="detail-loss-stats">
+                <div><span>Avg Loss</span><strong id="detail-loss-avg">-- %</strong></div>
+                <div><span>Max Loss</span><strong id="detail-loss-max">-- %</strong></div>
+                <div><span>Samples</span><strong id="detail-loss-samples">--</strong></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- SECTION 3: System Summary -->
+        <section class="deeplink-section">
+          <div class="deeplink-section-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+            <h3>System Summary &amp; Inventory</h3>
+            <span class="deeplink-hint">Hardware &amp; SNMP configuration</span>
+          </div>
+
+          <div class="deeplink-info-grid" id="detail-system-grid">
+            <div class="deeplink-info-card">
+              <span class="deeplink-info-label">Last Seen</span>
+              <span class="deeplink-info-value" id="detail-last-seen">--</span>
+            </div>
+            <div class="deeplink-info-card">
+              <span class="deeplink-info-label">Polling Interval</span>
+              <span class="deeplink-info-value" id="detail-poll-interval">--</span>
+            </div>
+            <div class="deeplink-info-card">
+              <span class="deeplink-info-label">SNMP Community</span>
+              <span class="deeplink-info-value" id="detail-snmp-comm">--</span>
+            </div>
+            <div class="deeplink-info-card">
+              <span class="deeplink-info-label">SNMP Port</span>
+              <span class="deeplink-info-value" id="detail-snmp-port">--</span>
+            </div>
+            <div class="deeplink-info-card">
+              <span class="deeplink-info-label">Detected Interfaces</span>
+              <span class="deeplink-info-value" id="detail-iface-count-info">--</span>
+            </div>
+            <div class="deeplink-info-card">
+              <span class="deeplink-info-label">CPU Load</span>
+              <span class="deeplink-info-value" id="detail-cpu">--</span>
+            </div>
+            <div class="deeplink-info-card">
+              <span class="deeplink-info-label">System Uptime</span>
+              <span class="deeplink-info-value" id="detail-uptime">--</span>
+            </div>
+            <div class="deeplink-info-card">
+              <span class="deeplink-info-label">Memory / Storage</span>
+              <span class="deeplink-info-value" id="detail-memory">--</span>
+            </div>
+          </div>
+          <div id="detail-system-note" class="deeplink-note" style="display:none;">
+            Some system metrics (CPU, Memory, Uptime) require the Telegraf agent to poll HOST-RESOURCES-MIB and DISMAN-EVENT-MIB OIDs. After updating config, restart Telegraf to start ingesting.
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: EDIT DEVICE (Update existing) -->
+  <div class="modal-backdrop" id="modal-device-edit">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title" id="modal-edit-title">Edit Device</div>
+        <button class="modal-close" id="modal-edit-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="edit-dev-id">
+        <div class="form-group">
+          <label for="edit-dev-name">Device Name / Label</label>
+          <input type="text" id="edit-dev-name" class="form-control" required>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="edit-dev-ip">IP Address / Host</label>
+            <input type="text" id="edit-dev-ip" class="form-control" required>
+          </div>
+          <div class="form-group">
+            <label for="edit-dev-type">Device Type</label>
+            <select id="edit-dev-type" class="form-control">
+              <option value="router">MikroTik Router</option>
+              <option value="switch">Managed Switch</option>
+              <option value="server">Linux / Server</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="edit-dev-community">SNMP Community</label>
+            <input type="text" id="edit-dev-community" class="form-control">
+          </div>
+          <div class="form-group">
+            <label for="edit-dev-port">SNMP Port</label>
+            <input type="number" id="edit-dev-port" class="form-control">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="edit-dev-interval">Polling Frequency</label>
+          <select id="edit-dev-interval" class="form-control">
+            <option value="1">1 Second (Real-Time Ultra)</option>
+            <option value="2">2 Seconds</option>
+            <option value="5">5 Seconds</option>
+          </select>
+        </div>
+
+        <div id="edit-result" style="display:none; padding:10px; border-radius:6px; font-size:0.75rem;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="btn-edit-cancel">Cancel</button>
+        <button class="btn-action" id="btn-save-edit">Save &amp; Reload Telegraf</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

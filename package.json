@@ -1,0 +1,34 @@
+{
+  "name": "itnetmon",
+  "version": "1.0.0",
+  "description": "ITNETMON - Dynamic Real-Time Network Monitoring Engine",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "css:build": "tailwindcss -i ./public/css/input.css -o ./public/css/output.css --minify",
+    "css:watch": "tailwindcss -i ./public/css/input.css -o ./public/css/output.css --watch"
+  },
+  "keywords": [
+    "network-monitoring",
+    "snmp",
+    "telegraf",
+    "influxdb",
+    "realtime",
+    "noc"
+  ],
+  "author": "ITNETMON Team",
+  "license": "MIT",
+  "dependencies": {
+    "@influxdata/influxdb-client": "^1.35.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pg": "^8.13.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "tailwindcss": "^4.3.3"
+  }
+}
