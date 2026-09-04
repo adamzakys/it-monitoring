@@ -24,11 +24,15 @@ const state = {
     inData: Array(60).fill(0),
     outData: Array(60).fill(0)
   },
+  alertDedup: new Set(), // key: "deviceId:type:severity"
   detailData: null,
   detailPollingTimer: null,
   topologyNetwork: null,
   topologyData: null,
-  topologyRefreshTimer: null
+  topologyRefreshTimer: null,
+  activePanelTab: 'incidents',
+  incidentSearch: '',
+  incidentSevFilter: 'all',
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -117,6 +121,19 @@ async function enrichDevicesWithRealtimeSnmp() {
  * Initializes High-Performance Chart.js Canvases
  */
 function initCharts() {
+  // Restore chart buffer from localStorage if available
+  try {
+    const saved = localStorage.getItem('bms_chart_buffer');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && parsed.labels && parsed.inData && parsed.outData) {
+        state.chartBuffer.labels = parsed.labels;
+        state.chartBuffer.inData = parsed.inData;
+        state.chartBuffer.outData = parsed.outData;
+      }
+    }
+  } catch (e) { /* ignore corrupt data */ }
+
   // 1. Traffic Dual-Line Area Chart
   const trafficCtx = document.getElementById('trafficAreaChart').getContext('2d');
   
@@ -313,8 +330,8 @@ function handleWsMessage(msg) {
     if (msg.deviceId === state.selectedDeviceId && msg.interfaceName === state.selectedInterface) {
       const inVal = typeof msg.inMbps === 'number' ? msg.inMbps.toFixed(2) : '0.00';
       const outVal = typeof msg.outMbps === 'number' ? msg.outMbps.toFixed(2) : '0.00';
-      document.getElementById('live-in-rate').textContent = `${inVal} Mbps`;
-      document.getElementById('live-out-rate').textContent = `${outVal} Mbps`;
+      document.getElementById('live-in-rate').textContent = `${inVal}`;
+      document.getElementById('live-out-rate').textContent = `${outVal}`;
 
       // Update Sliding Window Buffer (60 points FIFO)
       state.chartBuffer.labels.shift();
@@ -328,10 +345,27 @@ function handleWsMessage(msg) {
 
       // Ultra-lightweight chart update
       state.charts.traffic.update('none');
+
+      // Persist buffer to localStorage
+      try {
+        localStorage.setItem('bms_chart_buffer', JSON.stringify({
+          labels: state.chartBuffer.labels,
+          inData: state.chartBuffer.inData,
+          outData: state.chartBuffer.outData
+        }));
+      } catch (e) { /* ignore quota errors */ }
     }
   } else if (msg.type === 'NEW_ALERT') {
-    state.alerts.unshift(msg.alert);
-    renderAlertFeed();
+    const alert = msg.alert;
+    // Deduplicate: skip if same device+type+severity appeared in last 5 minutes
+    const dedupKey = `${alert.device_id || alert.deviceId}:${alert.type || ''}:${alert.severity}`;
+    const now = Date.now();
+    if (state.alertDedup.has(dedupKey)) return;
+    state.alertDedup.delete(dedupKey);
+    state.alertDedup.add(dedupKey);
+    setTimeout(() => state.alertDedup.delete(dedupKey), 5 * 60 * 1000);
+    state.alerts.unshift(alert);
+    renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
   } else if (msg.type === 'INIT_SYNC') {
     // Sinkronisasi awal saat WS connect - hitung ulang ringkasan live
     const devs = msg.devices || [];
@@ -356,6 +390,8 @@ function handleWsMessage(msg) {
       avg_latency_ms: msg.latency,
       server_time: msg.fullTime
     });
+    if (state.activePanelTab === 'quickstats') updateQuickStats();
+    if (state.activePanelTab === 'incidents') renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
   }
 }
 
@@ -513,6 +549,7 @@ function renderDeviceGrid() {
     card.innerHTML =
       '<div class="card-top">' +
         '<div class="status-dot-wrap"><span class="' + dotClass + '"></span><span class="status-text ' + statusText + '">' + statusText + '</span></div>' +
+        '<a href="#" class="card-detail-link card-detail-top" data-device-id="' + dev.id + '">View details &rarr;</a>' +
       '</div>' +
       '<div class="card-title">' + escapeHtml(dev.name) + '</div>' +
       '<div class="card-ip">' + escapeHtml(dev.ip_address) + '</div>' +
@@ -521,8 +558,7 @@ function renderDeviceGrid() {
         '<div class="stat-item"><span class="stat-label">Response Time</span><span class="stat-val" id="card-lat-' + dev.id + '">' + latText + '</span></div>' +
         '<div class="stat-item"><span class="stat-label">Packet Loss</span><span class="stat-val" id="card-loss-' + dev.id + '" style="color:' + lossColor + '">' + lossText + '</span></div>' +
         '<div class="stat-item"><span class="stat-label">Interfaces</span><span class="stat-val">' + ifaceText + '</span></div>' +
-      '</div>' +
-      '<div class="card-detail-cta"><a href="#" class="card-detail-link" data-device-id="' + dev.id + '">View details &rarr;</a></div>';
+      '</div>';
 
     card.addEventListener('click', function (e) {
       // If the click was on the detail link, ignore here and let the link handle it
@@ -575,7 +611,7 @@ function updateCardTelemetry(deviceId, latency, loss, status) {
     dObj.packet_loss = loss;
   }
 
-  // Update visual card border, background, and dot
+  // Update visual card border, background, dot, and status text
   if (card) {
     card.classList.remove('fault-offline', 'fault-warning');
     if (devStatus === 'offline') card.classList.add('fault-offline');
@@ -584,6 +620,12 @@ function updateCardTelemetry(deviceId, latency, loss, status) {
     const dot = card.querySelector('.status-dot');
     if (dot) {
       dot.className = `status-dot ${devStatus}`;
+    }
+
+    const statusTextEl = card.querySelector('.status-text');
+    if (statusTextEl) {
+      statusTextEl.className = `status-text ${devStatus}`;
+      statusTextEl.textContent = devStatus;
     }
   }
 
@@ -1102,11 +1144,24 @@ async function fetchThroughputHistory(deviceId, interfaceName) {
 /**
  * Renders Right Sidebar Incident Feed (Zona 5)
  */
-function renderAlertFeed() {
+function renderAlertFeed(searchQuery = '', sevFilter = 'all') {
   const container = document.getElementById('stream-log-container');
+  if (!container) return;
   container.innerHTML = '';
 
-  state.alerts.slice(0, 15).forEach(alert => {
+  const q = searchQuery.toLowerCase();
+  const filtered = state.alerts.filter(a => {
+    const matchSev = sevFilter === 'all' || a.severity === sevFilter;
+    const matchSearch = !q || (a.title + ' ' + a.target).toLowerCase().includes(q);
+    return matchSev && matchSearch;
+  });
+
+  if (filtered.length === 0) {
+    container.innerHTML = '<div style="text-align:center; padding:24px 12px; color:var(--text-muted); font-size:0.78rem;">No incidents match your filter</div>';
+    return;
+  }
+
+  filtered.slice(0, 20).forEach(alert => {
     const item = document.createElement('div');
     item.className = 'stream-item';
 
@@ -1132,10 +1187,102 @@ function renderAlertFeed() {
 
 function updateAlertCounter() {
   const count = state.alerts.filter(a => a.status === 'active').length;
-  document.getElementById('stream-badge-count').textContent = count;
-  document.getElementById('nav-alert-counter').textContent = count;
-  const floatCount = document.getElementById('floating-alert-count');
-  if (floatCount) floatCount.textContent = count;
+  const panelCountEl = document.getElementById('panel-incidents-count');
+  const streamBadgeEl = document.getElementById('stream-badge-count');
+  const navBadgeEl = document.getElementById('nav-alert-counter');
+  const floatCountEl = document.getElementById('floating-alert-count');
+  if (panelCountEl) panelCountEl.textContent = count;
+  if (streamBadgeEl) streamBadgeEl.textContent = count;
+  if (navBadgeEl) navBadgeEl.textContent = count;
+  if (floatCountEl) floatCountEl.textContent = count;
+}
+
+/**
+ * Updates the Quick Stats panel with live operational metrics
+ */
+function updateQuickStats() {
+  const devs = state.devices;
+
+  // Highest latency
+  const sortedByLatency = [...devs].sort((a, b) => (b.ping_latency || 0) - (a.ping_latency || 0));
+  const worst = sortedByLatency[0];
+  const latEl = document.getElementById('qs-highest-latency');
+  const latDevEl = document.getElementById('qs-highest-latency-device');
+  if (latEl) latEl.textContent = worst ? `${worst.ping_latency || '--'} ms` : '-- ms';
+  if (latDevEl) latDevEl.textContent = worst ? worst.name : '--';
+
+  // Offline count
+  const offlineCount = devs.filter(d => d.status === 'offline').length;
+  const offlineEl = document.getElementById('qs-offline-count');
+  const offlineDevsEl = document.getElementById('qs-offline-devices');
+  if (offlineEl) offlineEl.textContent = offlineCount;
+  if (offlineDevsEl) {
+    offlineDevsEl.textContent = offlineCount === 0
+      ? 'All operational'
+      : `${offlineCount} node${offlineCount > 1 ? 's' : ''} unreachable`;
+  }
+
+  // Average packet loss
+  const lossValues = devs.map(d => d.packet_loss || 0).filter(v => v > 0);
+  const avgLoss = lossValues.length > 0
+    ? (lossValues.reduce((s, v) => s + v, 0) / lossValues.length).toFixed(1)
+    : '0.0';
+  const lossEl = document.getElementById('qs-avg-loss');
+  const lossDetailEl = document.getElementById('qs-loss-detail');
+  if (lossEl) lossEl.textContent = `${avgLoss}%`;
+  if (lossDetailEl) lossDetailEl.textContent = `${lossValues.length} nodes with loss`;
+
+  // Uptime
+  const uptimeEl = document.getElementById('qs-uptime');
+  const uptimeTextEl = document.getElementById('uptime-text');
+  if (uptimeEl && uptimeTextEl) {
+    uptimeEl.textContent = uptimeTextEl.textContent || '--';
+    const pct = parseFloat(uptimeTextEl?.textContent);
+    uptimeEl.style.color = !isNaN(pct) && pct >= 99 ? 'var(--online)' : (!isNaN(pct) && pct >= 95 ? 'var(--warning)' : 'var(--offline)');
+  }
+
+  // WebSocket status
+  const wsEl = document.getElementById('qs-ws-status');
+  const wsDetailEl = document.getElementById('qs-ws-detail');
+  const pill = document.getElementById('ws-status-pill');
+  if (wsEl) {
+    const connected = state.ws && state.ws.readyState === WebSocket.OPEN;
+    wsEl.textContent = connected ? 'Connected' : 'Disconnected';
+    wsEl.style.color = connected ? 'var(--online)' : 'var(--offline)';
+  }
+  if (wsDetailEl) {
+    const statusText = document.getElementById('ws-status-text');
+    wsDetailEl.textContent = statusText ? statusText.textContent : '--';
+  }
+
+  // Telegraf status (derived from WS connection — if we have live data, Telegraf is running)
+  const telegrafEl = document.getElementById('qs-telegraf-status');
+  const telegrafDetailEl = document.getElementById('qs-telegraf-detail');
+  const hasLiveData = devs.some(d => d.ping_latency > 0);
+  if (telegrafEl) {
+    telegrafEl.textContent = hasLiveData ? 'Running' : 'Stopped';
+    telegrafEl.style.color = hasLiveData ? 'var(--online)' : 'var(--offline)';
+  }
+  if (telegrafDetailEl) {
+    telegrafDetailEl.textContent = hasLiveData
+      ? `${devs.filter(d => d.interfaces && d.interfaces.length > 0).length} devices polled`
+      : 'No SNMP data received';
+  }
+
+  // Busiest interface — estimate from highest outData in chart
+  const busiestEl = document.getElementById('qs-busiest-iface');
+  const busiestDevEl = document.getElementById('qs-busiest-iface-device');
+  if (busiestEl) busiestEl.textContent = state.selectedInterface || '--';
+  if (busiestDevEl) {
+    const selDev = devs.find(d => d.id === state.selectedDeviceId);
+    busiestDevEl.textContent = selDev ? selDev.name : '--';
+  }
+
+  // Last discovery
+  const lastDiscEl = document.getElementById('qs-last-discovery');
+  const discCountEl = document.getElementById('qs-discovery-count');
+  if (lastDiscEl) lastDiscEl.textContent = devs.length > 0 ? `${devs.length} nodes` : '--';
+  if (discCountEl) discCountEl.textContent = 'Pool size';
 }
 
 function formatTimeAgo(date) {
@@ -1187,8 +1334,8 @@ function setupEventListeners() {
     if (state.charts.traffic) {
       state.charts.traffic.update('none');
     }
-    document.getElementById('live-in-rate').textContent = '0.00 Mbps';
-    document.getElementById('live-out-rate').textContent = '0.00 Mbps';
+    document.getElementById('live-in-rate').textContent = '0.00';
+    document.getElementById('live-out-rate').textContent = '0.00';
     subscribeSelectedStream();
   });
 
@@ -1204,6 +1351,72 @@ function setupEventListeners() {
   btnExpand.addEventListener('click', () => {
     sidebarRight.classList.remove('collapsed');
   });
+
+  // Panel Tab Switching
+  let analyticsChartsInitialized = false;
+  document.querySelectorAll('.panel-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const tabName = tab.dataset.panelTab;
+      state.activePanelTab = tabName;
+      document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      document.querySelectorAll('.panel-tab-content').forEach(c => c.classList.remove('active'));
+      const contentEl = document.getElementById(`panel-${tabName}`);
+      if (contentEl) contentEl.classList.add('active');
+
+      if (tabName === 'quickstats') updateQuickStats();
+
+      if (tabName === 'analytics') {
+        // Charts need visible container — lazy-init on first open
+        if (!analyticsChartsInitialized) {
+          analyticsChartsInitialized = true;
+          setTimeout(() => {
+            if (state.charts.traffic) state.charts.traffic.resize();
+            if (state.charts.donut) state.charts.donut.resize();
+          }, 80);
+        }
+      }
+
+      sessionStorage.setItem('bms_panel_tab', tabName);
+    });
+  });
+
+  // Restore last active panel tab
+  const savedTab = sessionStorage.getItem('bms_panel_tab');
+  if (savedTab) {
+    const tabBtn = document.querySelector(`.panel-tab[data-panel-tab="${savedTab}"]`);
+    if (tabBtn) tabBtn.click();
+  }
+
+  // Incident Search in Panel
+  const incidentSearchInput = document.getElementById('incident-search');
+  if (incidentSearchInput) {
+    incidentSearchInput.addEventListener('input', (e) => {
+      state.incidentSearch = e.target.value;
+      renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
+    });
+  }
+
+  // Severity Filter in Panel
+  document.querySelectorAll('.sev-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.sev-filter').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.incidentSevFilter = btn.dataset.sev;
+      renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
+    });
+  });
+
+  // View Full Incident Log — navigate to Alerts page
+  const linkViewAll = document.getElementById('link-view-all-alerts');
+  if (linkViewAll) {
+    linkViewAll.addEventListener('click', (e) => {
+      e.preventDefault();
+      const alertsNav = document.getElementById('nav-alerts');
+      if (alertsNav) alertsNav.click();
+      sidebarRight.classList.add('collapsed');
+    });
+  }
 
   // Add Device Modal
   const modalDevice = document.getElementById('modal-device');
@@ -1421,6 +1634,83 @@ function setupNavNavigation() {
   });
 }
 
+/**
+ * Renders the Alerts page table with search, severity filter, duration, and acknowledge.
+ */
+function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
+  const tbody = document.getElementById('alerts-page-tbody');
+  if (!tbody) return;
+
+  const q = searchQuery.toLowerCase();
+  const filtered = state.alerts.filter(a => {
+    const matchSev = sevFilter === 'all' || a.severity === sevFilter;
+    const matchSearch = !q || (a.title + ' ' + (a.target || '') + ' ' + (a.device_name || '')).toLowerCase().includes(q);
+    return matchSev && matchSearch;
+  });
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" class="alerts-empty">No incidents match your filter</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(a => {
+    const sevClass = a.severity || 'info';
+    const startTime = new Date(a.created_at);
+    const duration = getDuration(startTime);
+    const status = a.status || 'active';
+    const statusClass = status === 'acknowledged' ? 'acknowledged' : (status === 'resolved' ? 'resolved' : 'active');
+    const isAcked = status === 'acknowledged';
+
+    return `
+      <tr>
+        <td>
+          <span class="alert-severity-badge ${sevClass}">
+            <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;"></span>
+            ${(a.severity || 'info').toUpperCase()}
+          </span>
+        </td>
+        <td class="alert-title-cell">
+          ${a.title || 'Unknown incident'}
+          <span>${a.message || a.type || ''}</span>
+        </td>
+        <td class="alert-device-cell">${a.target || '--'}</td>
+        <td class="alert-time-cell">${startTime.toLocaleString('id-ID', { hour12: false })}</td>
+        <td class="alert-duration-cell">${duration}</td>
+        <td class="alert-status-cell">
+          <span class="alert-status-pill ${statusClass}">${status}</span>
+        </td>
+        <td class="alert-actions-cell">
+          <button class="btn-ack ${isAcked ? 'acknowledged' : ''}" ${isAcked ? 'disabled' : ''} onclick="acknowledgeAlert(${a.id})">
+            ${isAcked ? 'ACKd' : 'ACK'}
+          </button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function getDuration(startTime) {
+  const diff = Date.now() - startTime.getTime();
+  if (diff < 0) return '--';
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ${mins % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+function acknowledgeAlert(id) {
+  const idx = state.alerts.findIndex(a => a.id === id);
+  if (idx !== -1) {
+    state.alerts[idx].status = 'acknowledged';
+    state.alerts[idx].acknowledged_at = new Date().toISOString();
+  }
+  const searchInput = document.getElementById('alerts-page-search-input');
+  const activeBtn = document.querySelector('.alerts-page-filter .active');
+  renderAlertsPageTable(searchInput?.value || '', activeBtn?.dataset.alertsSev || 'all');
+}
+
 function renderSecondaryView(view, container, titleEl, subtitleEl) {
   if (view === 'devices') {
     titleEl.textContent = 'Device Inventory & Telegraf Config Manager';
@@ -1502,31 +1792,52 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
     titleEl.textContent = 'Incident Auditing & Alarm Center';
     subtitleEl.textContent = 'Historical log of network anomalies, packet loss degradation, and link flaps';
     container.innerHTML = `
-      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:20px;">
-        <table style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
+      <div class="alerts-page-toolbar">
+        <div class="alerts-page-search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input type="text" id="alerts-page-search-input" placeholder="Search incidents...">
+        </div>
+        <div class="alerts-page-filter btn-filter-group">
+          <button class="btn-filter active" data-alerts-sev="all">All</button>
+          <button class="btn-filter" data-alerts-sev="critical">Critical</button>
+          <button class="btn-filter" data-alerts-sev="warning">Warning</button>
+          <button class="btn-filter" data-alerts-sev="info">Info</button>
+        </div>
+      </div>
+      <div class="alerts-table-wrap">
+        <table class="alerts-table">
           <thead>
-            <tr style="border-bottom:1px solid var(--border-subtle); color:var(--text-muted);">
-              <th style="padding:10px;">Severity</th>
-              <th>Incident</th>
-              <th>Target Node</th>
-              <th>Time</th>
+            <tr>
+              <th>Severity</th>
+              <th>Incident / Target</th>
+              <th>Node</th>
+              <th>First Seen</th>
+              <th>Duration</th>
               <th>Status</th>
+              <th></th>
             </tr>
           </thead>
-          <tbody>
-            ${state.alerts.map(a => `
-              <tr style="border-bottom:1px solid var(--border-subtle);">
-                <td style="padding:12px 10px;"><span class="brand-badge" style="background:${a.severity==='critical'?'rgba(239,68,68,0.2)':(a.severity==='warning'?'rgba(245,158,11,0.2)':'rgba(16,185,129,0.2)')}; color:${a.severity==='critical'?'#ef4444':(a.severity==='warning'?'#f59e0b':'#10b981')}">${a.severity.toUpperCase()}</span></td>
-                <td style="font-weight:600;">${a.title}</td>
-                <td style="font-family:var(--font-mono); color:var(--text-muted);">${a.target}</td>
-                <td>${formatTimeAgo(new Date(a.created_at))}</td>
-                <td><span style="color:var(--color-online);">Active</span></td>
-              </tr>
-            `).join('')}
+          <tbody id="alerts-page-tbody">
           </tbody>
         </table>
       </div>
     `;
+
+    // Wire search and severity filter
+    setTimeout(() => {
+      const searchInput = document.getElementById('alerts-page-search-input');
+      if (searchInput) {
+        searchInput.addEventListener('input', () => renderAlertsPageTable(searchInput.value, document.querySelector('.alerts-page-filter .active')?.dataset.alertsSev || 'all'));
+      }
+      document.querySelectorAll('.alerts-page-filter .btn-filter').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.alerts-page-filter .btn-filter').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          renderAlertsPageTable(searchInput?.value || '', btn.dataset.alertsSev);
+        });
+      });
+      renderAlertsPageTable('', 'all');
+    }, 0);
   } else if (view === 'reports') {
     titleEl.textContent = 'Performance & Availability Reports';
     subtitleEl.textContent = 'Monthly SLA metrics, availability scores, and exportable traffic summaries';

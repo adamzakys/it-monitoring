@@ -23,8 +23,10 @@
           <div class="brand-icon">
             <img src="/images/Logo-Berlian-Manyar-Sejahtera.png" alt="BMS IT Monitoring logo" />
           </div>
-          <div class="brand-title">BMS IT Monitoring</div>
-          <div class="brand-subtitle">PT. Berlian Manyar Sejahtera</div>
+          <div class="brand-titles">
+            <span class="brand-title">BMS IT Monitoring</span>
+            <span class="brand-subtitle">PT. Berlian Manyar Sejahtera</span>
+          </div>
         </div>
 
         <ul class="nav-menu">
@@ -56,14 +58,6 @@
         </ul>
       </div>
 
-      <!-- User Profile & Session Panel -->
-      <div class="user-panel">
-        <div class="user-avatar">AD</div>
-        <div class="user-info">
-          <div class="user-name">Network Admin</div>
-          <div class="user-role">Superuser • NOC Operator</div>
-        </div>
-      </div>
     </aside>
 
     <!-- MAIN VIEWPORT (ZONES 2, 3, 4) -->
@@ -184,73 +178,6 @@
           </div>
         </section>
 
-        <!-- ZONA 4: PERFORMANCE & DISTRIBUTION ANALYTICS -->
-        <section class="analytics-grid">
-          <!-- 1. Network Traffic Dual-Line Area Chart -->
-          <div class="analytics-card">
-            <div class="analytics-header">
-              <div class="chart-title-group">
-                <h3 id="traffic-chart-title">Real-Time Throughput Stream: MikroTik CHR (Lab Router)</h3>
-                <span id="traffic-chart-subtitle">Sliding window 60s @ 1s frequency</span>
-              </div>
-
-              <div class="chart-controls">
-                <select class="select-interface" id="chart-interface-select">
-                  <option value="ether1">ether1</option>
-                </select>
-
-                <div class="chart-legend-custom">
-                  <div class="legend-item">
-                    <span class="legend-bar in"></span>
-                    <span>Inbound (Download): <strong id="live-in-rate">0.00 Mbps</strong></span>
-                  </div>
-                  <div class="legend-item">
-                    <span class="legend-bar out"></span>
-                    <span>Outbound (Upload): <strong id="live-out-rate">0.00 Mbps</strong></span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="chart-canvas-wrap">
-              <canvas id="trafficAreaChart"></canvas>
-            </div>
-          </div>
-
-          <!-- 2. Device Status Donut Chart -->
-          <div class="analytics-card">
-            <div class="analytics-header">
-              <div class="chart-title-group">
-                <h3>Availability Distribution</h3>
-                <span>Inventory health state</span>
-              </div>
-            </div>
-
-            <div class="donut-center-container">
-              <canvas id="statusDonutChart"></canvas>
-              <div class="donut-center-text">
-                <div class="donut-center-number" id="donut-total-count">0</div>
-                <div class="donut-center-label">Monitored</div>
-              </div>
-            </div>
-
-            <div class="donut-legend">
-              <div class="donut-legend-item">
-                <span class="donut-legend-dot online"></span>
-                <span>Online (<span id="donut-online-count">0</span>)</span>
-              </div>
-              <div class="donut-legend-item">
-                <span class="donut-legend-dot warning"></span>
-                <span>Warning (<span id="donut-warning-count">0</span>)</span>
-              </div>
-              <div class="donut-legend-item">
-                <span class="donut-legend-dot offline"></span>
-                <span>Offline (<span id="donut-offline-count">0</span>)</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
       </div>
 
       <!-- ALTERNATIVE TAB PANELS (Devices, Map, Alerts, Reports, Settings) -->
@@ -259,29 +186,160 @@
       </div>
     </main>
 
-    <!-- ZONA 5: RIGHT SIDEBAR: REAL-TIME EVENT STREAM -->
+    <!-- ZONA 5: RIGHT UTILITY PANEL (Tabbed: Incidents | Analytics | Quick Stats) -->
     <aside class="sidebar-right" id="sidebar-right">
-      <div class="stream-header">
-        <div class="stream-title-group">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
-          <span class="stream-title">Live Incident Stream</span>
-          <span class="stream-count-badge" id="stream-badge-count">2</span>
+      <!-- Panel Header with Tabs -->
+      <div class="panel-header">
+        <div class="panel-tabs" id="panel-tabs">
+          <button class="panel-tab active" data-panel-tab="incidents">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+            Incidents
+            <span class="panel-tab-badge" id="panel-incidents-count">0</span>
+          </button>
+          <button class="panel-tab" data-panel-tab="analytics">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            Analytics
+          </button>
+          <button class="panel-tab" data-panel-tab="quickstats">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            Quick Stats
+          </button>
         </div>
-
-        <div class="stream-actions">
-          <button class="btn-toggle-sidebar" id="btn-collapse-sidebar" title="Collapse Feed">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        <div class="panel-actions">
+          <button class="btn-toggle-sidebar" id="btn-collapse-sidebar" title="Collapse Panel">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
           </button>
         </div>
       </div>
 
-      <!-- Stream Log List -->
-      <div class="stream-list" id="stream-log-container">
-        <!-- Rendered dynamically by app.js -->
+      <!-- TAB: INCIDENTS -->
+      <div class="panel-tab-content active" id="panel-incidents">
+        <div class="incidents-toolbar">
+          <div class="search-input-wrap" style="width:100%;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="incident-search" class="search-input" placeholder="Search incidents...">
+          </div>
+          <div class="severity-filter-group" id="severity-filter">
+            <button class="sev-filter active" data-sev="all">All</button>
+            <button class="sev-filter" data-sev="critical">Crit</button>
+            <button class="sev-filter" data-sev="warning">Warn</button>
+            <button class="sev-filter" data-sev="info">Info</button>
+          </div>
+        </div>
+        <div class="stream-list" id="stream-log-container"></div>
+        <div class="panel-footer">
+          <a href="#" id="link-view-all-alerts" class="footer-link">View Full Incident Log &rarr;</a>
+        </div>
       </div>
 
-      <div class="stream-footer">
-        <a href="#" id="link-view-all-alerts">View Full Incident Log &rarr;</a>
+      <!-- TAB: ANALYTICS -->
+      <div class="panel-tab-content" id="panel-analytics">
+        <div class="analytics-scroll-area">
+          <!-- Traffic Chart -->
+          <div class="analytics-card" style="margin-bottom:12px;">
+            <div class="analytics-header">
+              <div class="chart-title-group">
+                <h4 id="traffic-chart-title">Throughput: MikroTik CHR</h4>
+                <span id="traffic-chart-subtitle">60s sliding window</span>
+              </div>
+              <div class="chart-controls">
+                <select class="select-interface" id="chart-interface-select" style="font-size:0.7rem; padding:3px 7px;">
+                  <option value="ether1">ether1</option>
+                </select>
+              </div>
+            </div>
+            <div class="chart-legend-row">
+              <div class="legend-item">
+                <span class="legend-bar in"></span>
+                <span>In: <strong id="live-in-rate">0.00</strong> Mbps</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-bar out"></span>
+                <span>Out: <strong id="live-out-rate">0.00</strong> Mbps</span>
+              </div>
+            </div>
+            <div class="chart-canvas-wrap" style="min-height:160px;">
+              <canvas id="trafficAreaChart"></canvas>
+            </div>
+          </div>
+
+          <!-- Availability Donut -->
+          <div class="analytics-card" style="margin-bottom:12px;">
+            <div class="analytics-header">
+              <div class="chart-title-group">
+                <h4>Availability</h4>
+                <span id="donut-chart-subtitle">Inventory health</span>
+              </div>
+            </div>
+            <div class="donut-center-container">
+              <canvas id="statusDonutChart"></canvas>
+              <div class="donut-center-text">
+                <div class="donut-center-number" id="donut-total-count">0</div>
+                <div class="donut-center-label">Nodes</div>
+              </div>
+            </div>
+            <div class="donut-legend">
+              <div class="donut-legend-item">
+                <span class="donut-legend-dot online"></span>
+                <span>Online <strong id="donut-online-count">0</strong></span>
+              </div>
+              <div class="donut-legend-item">
+                <span class="donut-legend-dot warning"></span>
+                <span>Warn <strong id="donut-warning-count">0</strong></span>
+              </div>
+              <div class="donut-legend-item">
+                <span class="donut-legend-dot offline"></span>
+                <span>Off <strong id="donut-offline-count">0</strong></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB: QUICK STATS -->
+      <div class="panel-tab-content" id="panel-quickstats">
+        <div class="quickstats-list" id="quickstats-list">
+          <div class="quickstat-item">
+            <div class="quickstat-label">Highest Latency</div>
+            <div class="quickstat-value" id="qs-highest-latency">-- ms</div>
+            <div class="quickstat-device" id="qs-highest-latency-device">--</div>
+          </div>
+          <div class="quickstat-item">
+            <div class="quickstat-label">Busiest Interface</div>
+            <div class="quickstat-value" id="qs-busiest-iface">--</div>
+            <div class="quickstat-device" id="qs-busiest-iface-device">--</div>
+          </div>
+          <div class="quickstat-item">
+            <div class="quickstat-label">Offline Nodes</div>
+            <div class="quickstat-value" id="qs-offline-count">0</div>
+            <div class="quickstat-device" id="qs-offline-devices">All operational</div>
+          </div>
+          <div class="quickstat-item">
+            <div class="quickstat-label">Last Discovery</div>
+            <div class="quickstat-value" id="qs-last-discovery">--</div>
+            <div class="quickstat-device" id="qs-discovery-count">-- nodes found</div>
+          </div>
+          <div class="quickstat-item">
+            <div class="quickstat-label">Telegraf Status</div>
+            <div class="quickstat-value" id="qs-telegraf-status">--</div>
+            <div class="quickstat-device" id="qs-telegraf-detail">--</div>
+          </div>
+          <div class="quickstat-item">
+            <div class="quickstat-label">Avg Packet Loss</div>
+            <div class="quickstat-value" id="qs-avg-loss">-- %</div>
+            <div class="quickstat-device" id="qs-loss-detail">Across all nodes</div>
+          </div>
+          <div class="quickstat-item">
+            <div class="quickstat-label">WebSocket</div>
+            <div class="quickstat-value" id="qs-ws-status">--</div>
+            <div class="quickstat-device" id="qs-ws-detail">--</div>
+          </div>
+          <div class="quickstat-item">
+            <div class="quickstat-label">30-Day Uptime</div>
+            <div class="quickstat-value" id="qs-uptime">-- %</div>
+            <div class="quickstat-device" id="qs-uptime-detail">SLA target: 99.5%</div>
+          </div>
+        </div>
       </div>
     </aside>
 
