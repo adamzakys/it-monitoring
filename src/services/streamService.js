@@ -521,9 +521,11 @@ async function evaluateDeviceHealth(device, metric) {
       await emitEvent(device.id, device.name, EVENT_TYPES.OFFLINE, metric.packetLoss);
       const existingIncident = await getActiveIncidentForDevice(device.id);
       if (existingIncident) {
-        await updateIncidentSeverity(device.id, 'critical', INCIDENT_STATES.OFFLINE, metric);
+        const updated = await updateIncidentSeverity(device.id, 'critical', INCIDENT_STATES.OFFLINE, metric);
+        if (updated) broadcastIncidentUpdated(updated);
       } else {
-        await createIncident(device.id, device.name, 'critical', INCIDENT_STATES.OFFLINE, metric);
+        const created = await createIncident(device.id, device.name, 'critical', INCIDENT_STATES.OFFLINE, metric);
+        if (created) broadcastIncidentCreated(created);
       }
       await triggerAlert({
         deviceId: device.id,
@@ -543,7 +545,8 @@ async function evaluateDeviceHealth(device, metric) {
       track.currentStatus = 'warning';
       const eventType = metric.latency > 45 ? EVENT_TYPES.LATENCY_HIGH : EVENT_TYPES.PACKET_LOSS_HIGH;
       await emitEvent(device.id, device.name, eventType, metric.latency || metric.packetLoss);
-      await createIncident(device.id, device.name, 'warning', INCIDENT_STATES.WARNING, metric);
+      const created = await createIncident(device.id, device.name, 'warning', INCIDENT_STATES.WARNING, metric);
+      if (created) broadcastIncidentCreated(created);
       await triggerAlert({
         deviceId: device.id,
         type: 'degraded',
@@ -562,7 +565,8 @@ async function evaluateDeviceHealth(device, metric) {
       const prevStatus = track.currentStatus;
       track.currentStatus = 'online';
       await emitEvent(device.id, device.name, EVENT_TYPES.ONLINE, metric.latency);
-      await closeIncident(device.id, INCIDENT_STATES.RECOVERED, metric);
+      const resolved = await closeIncident(device.id, INCIDENT_STATES.RECOVERED, metric);
+      if (resolved) broadcastIncidentResolved(resolved);
       await triggerAlert({
         deviceId: device.id,
         type: 'recovered',
@@ -676,9 +680,37 @@ function broadcastNewAlert(alert) {
   }
 }
 
+function broadcastIncident(incident, eventType) {
+  if (!wss) return;
+  const payload = JSON.stringify({
+    type: 'INCIDENT_' + eventType,
+    incident
+  });
+  for (const client of wss.clients) {
+    if (client.readyState === client.OPEN) {
+      client.send(payload);
+    }
+  }
+}
+
+function broadcastIncidentCreated(incident) {
+  broadcastIncident(incident, 'CREATED');
+}
+
+function broadcastIncidentUpdated(incident) {
+  broadcastIncident(incident, 'UPDATED');
+}
+
+function broadcastIncidentResolved(incident) {
+  broadcastIncident(incident, 'RESOLVED');
+}
+
 module.exports = {
   initStreamService,
   broadcastNewAlert,
+  broadcastIncidentCreated,
+  broadcastIncidentUpdated,
+  broadcastIncidentResolved,
   getRealTimeInterfaces,
   realTimeSnmpPoll,
   getRealTimeInterfaceMbps,

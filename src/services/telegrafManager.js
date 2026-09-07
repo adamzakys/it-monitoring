@@ -86,41 +86,41 @@ function buildTelegrafConfig(device) {
   const sanitizedName = device.name.replace(/[^a-zA-Z0-9_-]/g, '_');
   const snmpPort = device.snmp_port || 161;
   const community = device.snmp_community || 'public';
-  const interval = `${device.polling_interval || 1}s`;
 
   return `# =====================================================================
 # ITNETMON Dynamic Poller Config for Device: ${device.name} (ID: ${device.id})
 # Auto-generated at: ${new Date().toISOString()}
-# OID strategy:
-#   - IF-MIB OIDs use textual names (Telegraf auto-walks table correctly)
-#   - DISMAN-EVENT-MIB & HOST-RESOURCES-MIB use numeric OIDs (more portable,
-#     avoids dependency on MIB file loading order in gosmi)
+# Interval strategy:
+#   - Ping: 1s (fast detection)
+#   - Interface traffic: 5s (counters)
+#   - Interface inventory: 60s (rarely changes)
+#   - CPU: 5s
+#   - Storage: 60s
 # =====================================================================
 
-# 1. ICMP Ping Poller (1s interval)
+# 1. ICMP Ping Poller (1s interval — fast detection)
 [[inputs.ping]]
-  interval = "${interval}"
+  interval = "1s"
   urls = ["${device.ip_address}"]
   count = 1
   ping_interval = 1.0
-  timeout = 0.8
-  deadline = 1
+  timeout = 2
+  deadline = 2
   binary = "ping"
   [inputs.ping.tags]
     device_id = "${device.id}"
     device_name = "${sanitizedName}"
     device_ip = "${device.ip_address}"
 
-# 2. SNMP Table Poller (IF-MIB 64-bit HC Counters)
+# 2. SNMP Interface Traffic Poller (5s interval — HC counters)
 [[inputs.snmp]]
-  interval = "${interval}"
+  interval = "5s"
   agents = ["udp://${device.ip_address}:${snmpPort}"]
   version = 2
   community = "${community}"
-  timeout = "800ms"
-  retries = 1
+  timeout = "2s"
+  retries = 2
 
-  # Path ke MIB files untuk resolve IF-MIB textual OIDs
   path = ["/usr/share/snmp/mibs"]
 
   [inputs.snmp.tags]
@@ -128,16 +128,10 @@ function buildTelegrafConfig(device) {
     device_name = "${sanitizedName}"
     device_ip = "${device.ip_address}"
 
-  # Walk interface table dynamically (textual OID — Telegraf handles table walking)
   [[inputs.snmp.table]]
     oid = "IF-MIB::ifXTable"
     name = "net_interface"
     inherit_tags = ["device_id", "device_name", "device_ip"]
-
-    [[inputs.snmp.table.field]]
-      oid = "IF-MIB::ifName"
-      name = "interface_name"
-      is_tag = true
 
     [[inputs.snmp.table.field]]
       oid = "IF-MIB::ifHCInOctets"
@@ -171,6 +165,32 @@ function buildTelegrafConfig(device) {
       oid = "IF-MIB::ifOutDiscards"
       name = "ifOutDiscards"
 
+# 3. SNMP Interface Inventory Poller (60s — rarely changes)
+[[inputs.snmp]]
+  interval = "60s"
+  agents = ["udp://${device.ip_address}:${snmpPort}"]
+  version = 2
+  community = "${community}"
+  timeout = "2s"
+  retries = 2
+
+  path = ["/usr/share/snmp/mibs"]
+
+  [inputs.snmp.tags]
+    device_id = "${device.id}"
+    device_name = "${sanitizedName}"
+    device_ip = "${device.ip_address}"
+
+  [[inputs.snmp.table]]
+    oid = "IF-MIB::ifXTable"
+    name = "net_interface_inv"
+    inherit_tags = ["device_id", "device_name", "device_ip"]
+
+    [[inputs.snmp.table.field]]
+      oid = "IF-MIB::ifName"
+      name = "interface_name"
+      is_tag = true
+
     [[inputs.snmp.table.field]]
       oid = "IF-MIB::ifOperStatus"
       name = "oper_status"
@@ -179,14 +199,26 @@ function buildTelegrafConfig(device) {
       oid = "IF-MIB::ifHighSpeed"
       name = "speed_mbps"
 
-  # 3. System Uptime — sysUpTime.0 (centi-seconds, divide by 100 → seconds)
-  # Numeric OID: .1.3.6.1.2.1.1.3.0 (DISMAN-EVENT-MIB::sysUpTime.0)
+# 4. SNMP System Metrics (60s — uptime, CPU, storage)
+[[inputs.snmp]]
+  interval = "60s"
+  agents = ["udp://${device.ip_address}:${snmpPort}"]
+  version = 2
+  community = "${community}"
+  timeout = "2s"
+  retries = 2
+
+  [inputs.snmp.tags]
+    device_id = "${device.id}"
+    device_name = "${sanitizedName}"
+    device_ip = "${device.ip_address}"
+
+  # System Uptime
   [[inputs.snmp.field]]
     oid = ".1.3.6.1.2.1.1.3.0"
     name = "uptime_ticks"
 
-  # 4. Host Resources MIB — CPU Load
-  # Numeric OID: .1.3.6.1.2.1.25.3.3 (HOST-RESOURCES-MIB::hrProcessorTable)
+  # CPU Load (Host Resources MIB)
   [[inputs.snmp.table]]
     oid = ".1.3.6.1.2.1.25.3.3"
     name = "system_cpu"
@@ -196,12 +228,7 @@ function buildTelegrafConfig(device) {
       oid = ".1.3.6.1.2.1.25.3.3.1.2"
       name = "cpu_load_pct"
 
-  # 5. Host Resources MIB — Memory/Storage
-  # Numeric OID: .1.3.6.1.2.1.25.2.3 (HOST-RESOURCES-MIB::hrStorageTable)
-  # hrStorageSize and hrStorageUsed are reported in *allocation units* (the size
-  # of one allocation block, usually 4096 bytes on Linux). We also collect
-  # hrStorageAllocationUnits and hrStorageDescr so the backend can convert
-  # to bytes and identify "Physical memory" reliably across vendors.
+  # Storage (Host Resources MIB)
   [[inputs.snmp.table]]
     oid = ".1.3.6.1.2.1.25.2.3"
     name = "system_storage"
@@ -212,9 +239,6 @@ function buildTelegrafConfig(device) {
       name = "storage_type"
       is_tag = true
 
-    # Phase 1.5: collect the human-readable description ("Physical memory",
-    # "Swap space", "/", etc.) as a tag so the backend can identify the
-    # physical-RAM entry unambiguously across vendors.
     [[inputs.snmp.table.field]]
       oid = ".1.3.6.1.2.1.25.2.3.1.3"
       name = "storage_descr"

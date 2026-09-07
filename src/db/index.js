@@ -111,31 +111,9 @@ async function initDB() {
       console.log('[DB] Seed data populated successfully.');
     }
 
-    // Seed 30-day daily_uptime history if empty (untuk SLA sparkline riil)
-    try {
-      const upCheck = await client.query('SELECT COUNT(*) FROM daily_uptime');
-      if (parseInt(upCheck.rows[0].count, 10) === 0) {
-        console.log('[DB] Seeding 30-day daily_uptime history...');
-        const now = new Date();
-        for (let i = 29; i >= 0; i--) {
-          const d = new Date(now);
-          d.setDate(d.getDate() - i);
-          const dateStr = d.toISOString().split('T')[0];
-          // Realistis: 99.5–100%, total_checks 86400 (1 ping/detik), loss kecil
-          const basePct = 99.5 + Math.random() * 0.5;
-          const totalChecks = 86400;
-          const successful = Math.round(totalChecks * (basePct / 100));
-          await client.query(
-            `INSERT INTO daily_uptime (date, total_checks, successful_checks, uptime_percentage)
-             VALUES ($1, $2, $3, $4) ON CONFLICT (date) DO NOTHING`,
-            [dateStr, totalChecks, successful, basePct.toFixed(2)]
-          );
-        }
-        console.log('[DB] 30-day uptime history seeded.');
-      }
-    } catch (e) {
-      console.warn('[DB WARN] daily_uptime seed skipped:', e.message);
-    }
+    // 30-day SLA: only use real data from daily_uptime table
+    // If table is empty, leave it empty - do not generate fake data
+    // Frontend will show "Not enough historical data" when no records exist
 
     client.release();
   } catch (err) {

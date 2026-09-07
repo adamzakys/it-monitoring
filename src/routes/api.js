@@ -866,6 +866,44 @@ router.get('/alerts', async (req, res) => {
   }
 });
 
+// 4c. Activity Events
+router.get('/events', async (req, res) => {
+  try {
+    const { deviceId, severity, eventType, limit = 100, offset = 0 } = req.query;
+    let query = 'SELECT * FROM events WHERE 1=1';
+    const params = [];
+    let paramIdx = 1;
+
+    if (deviceId) {
+      query += ` AND device_id = $${paramIdx}`;
+      params.push(parseInt(deviceId, 10));
+      paramIdx++;
+    }
+    if (severity && severity !== 'all') {
+      query += ` AND severity = $${paramIdx}`;
+      params.push(severity);
+      paramIdx++;
+    }
+    if (eventType && eventType !== 'all') {
+      query += ` AND event_type = $${paramIdx}`;
+      params.push(eventType);
+      paramIdx++;
+    }
+
+    query += ` ORDER BY timestamp DESC LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`;
+    params.push(parseInt(limit, 10), parseInt(offset, 10));
+
+    let events = [];
+    if (db.isPostgresConnected()) {
+      const eventRes = await db.query(query, params);
+      events = eventRes.rows;
+    }
+    res.json({ success: true, events });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
 // 4b. Live Feed Snapshot - data live aktual (devices, alerts, ws, throughput aggregate)
 router.get('/live-feed', async (req, res) => {
   try {
@@ -951,23 +989,16 @@ router.get('/reports/sla', async (req, res) => {
       sla30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
     }
 
-    // Total ingestion points (24h) dari InfluxDB riil, fallback ke estimasi
+    // Total ingestion points (24h) dari InfluxDB riil, only if available
     let ingestion24h = 0;
+    let influx_has_ingestion = false;
     try {
-      ingestion24h = await influxService.getIngestionCount();
-    } catch (e) { /* ignore */ }
-
-    if (ingestion24h === 0) {
-      // Estimasi konservatif: devices * 86400 detik (1Hz ping) + asumsi 4 interface/device
-      let total = 0;
-      if (db.isPostgresConnected()) {
-        const dr = await db.query('SELECT COUNT(*)::int as c FROM devices');
-        total = dr.rows[0].c;
-      } else {
-        total = db.getMemoryStore().devices.length;
+      const count = await influxService.getIngestionCount();
+      if (count > 0) {
+        ingestion24h = count;
+        influx_has_ingestion = true;
       }
-      ingestion24h = total * 86400 * 5; // 5 fields: ping latency, ping loss, if in, if out, if speed
-    }
+    } catch (e) { /* ignore */ }
 
     // Avg latency & packet loss riil dari InfluxDB 24h
     let summary = { avg_latency_ms: 0, avg_packet_loss: 0, has_data: false };
@@ -995,6 +1026,7 @@ router.get('/reports/sla', async (req, res) => {
       sla_30d: sla30d,
       daily_breakdown: daily,
       total_ingestion_24h: ingestion24h,
+      influx_has_ingestion: influx_has_ingestion,
       avg_latency_ms: summary.avg_latency_ms,
       avg_packet_loss: summary.avg_packet_loss,
       influx_has_data: summary.has_data,

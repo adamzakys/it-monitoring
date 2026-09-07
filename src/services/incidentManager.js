@@ -15,6 +15,7 @@ const INCIDENT_STATES = {
 };
 
 const memoryIncidents = new Map();
+const pendingCreations = new Set();
 
 function generateIncidentId(deviceId) {
   const timestamp = Date.now().toString(36);
@@ -166,50 +167,62 @@ function addStatusHistoryEntry(incident, newEventType, metric) {
 }
 
 async function createIncident(deviceId, deviceName, severity, eventType, metric) {
-  const existingActive = await getActiveIncidentForDevice(deviceId);
-  if (existingActive) {
-    return existingActive;
+  if (pendingCreations.has(deviceId)) {
+    await new Promise(r => setTimeout(r, 100));
+    const existing = await getActiveIncidentForDevice(deviceId);
+    if (existing) return existing;
   }
+  pendingCreations.add(deviceId);
 
-  const incidentId = generateIncidentId(deviceId);
-  const rootCause = buildRootCause(eventType, metric);
-  const now = new Date().toISOString();
-
-  const incident = {
-    incidentId,
-    deviceId,
-    deviceName,
-    currentSeverity: severity,
-    status: STATUS.ACTIVE,
-    startedAt: now,
-    endedAt: null,
-    durationMs: null,
-    rootCause,
-    evidence: createEvidence(metric),
-    statusHistory: [
-      {
-        status: eventType,
-        event: getStatusHistoryLabel(eventType, metric),
-        timestamp: now
-      }
-    ]
-  };
-
-  memoryIncidents.set(deviceId, incident);
-
-  if (db.isPostgresConnected()) {
-    try {
-      await db.query(
-        `INSERT INTO incidents (incident_id, device_id, device_name, current_severity, status, started_at, root_cause, evidence, status_history)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [incidentId, deviceId, deviceName, severity, STATUS.ACTIVE, incident.startedAt, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory)]
-      );
-    } catch (err) {
-      console.error('[IncidentManager] Failed to create incident:', err.message);
+  try {
+    const existingActive = await getActiveIncidentForDevice(deviceId);
+    if (existingActive) {
+      return existingActive;
     }
-  }
 
-  return incident;
+    const incidentId = generateIncidentId(deviceId);
+    const rootCause = buildRootCause(eventType, metric);
+    const now = new Date().toISOString();
+
+    const incident = {
+      incidentId,
+      deviceId,
+      deviceName,
+      currentSeverity: severity,
+      status: STATUS.ACTIVE,
+      startedAt: now,
+      endedAt: null,
+      durationMs: null,
+      rootCause,
+      evidence: createEvidence(metric),
+      statusHistory: [
+        {
+          status: eventType,
+          event: getStatusHistoryLabel(eventType, metric),
+          timestamp: now
+        }
+      ]
+    };
+
+    memoryIncidents.set(deviceId, incident);
+
+    if (db.isPostgresConnected()) {
+      try {
+        await db.query(
+          `INSERT INTO incidents (incident_id, device_id, device_name, current_severity, status, started_at, root_cause, evidence, status_history)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [incidentId, deviceId, deviceName, severity, STATUS.ACTIVE, incident.startedAt, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory)]
+        );
+      } catch (err) {
+        console.error('[IncidentManager] Failed to create incident:', err.message);
+        memoryIncidents.delete(deviceId);
+      }
+    }
+
+    return incident;
+  } finally {
+    pendingCreations.delete(deviceId);
+  }
 }
 
 async function updateIncidentSeverity(deviceId, newSeverity, eventType, metric) {
@@ -344,7 +357,7 @@ async function getIncidentHistory(limit = 100) {
   if (db.isPostgresConnected()) {
     try {
       const res = await db.query(
-        `SELECT * FROM incidents ORDER BY started_at DESC LIMIT $1`,
+        `SELECT * FROM incidents WHERE status = 'resolved' ORDER BY started_at DESC LIMIT $1`,
         [limit]
       );
       return res.rows.map(parseIncidentRow);

@@ -75,8 +75,6 @@ async function loadInitialData() {
       state.activeIncidents = incidentRes.active || [];
       state.incidentHistory = incidentRes.history || [];
       renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
-    } else {
-      renderAlertFeed();
     }
     if (feedRes.success) {
       updateLiveFeedPill(feedRes);
@@ -374,7 +372,49 @@ function handleWsMessage(msg) {
     state.alertDedup.add(dedupKey);
     setTimeout(() => state.alertDedup.delete(dedupKey), 5 * 60 * 1000);
     state.alerts.unshift(alert);
-    renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
+    if (state.activePanelTab === 'alerts') {
+      renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
+    } else if (state.activePanelTab === 'incidents') {
+      updateIncidentBadge();
+    }
+  } else if (msg.type === 'INCIDENT_CREATED') {
+    const incident = msg.incident;
+    if (incident && incident.incidentId) {
+      const exists = state.activeIncidents.find(i => i.incidentId === incident.incidentId);
+      if (!exists) {
+        state.activeIncidents.unshift(incident);
+      }
+      if (state.activePanelTab === 'incidents') {
+        renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
+      } else {
+        updateIncidentBadge();
+      }
+    }
+  } else if (msg.type === 'INCIDENT_UPDATED') {
+    const incident = msg.incident;
+    if (incident && incident.incidentId) {
+      const idx = state.activeIncidents.findIndex(i => i.incidentId === incident.incidentId);
+      if (idx >= 0) {
+        state.activeIncidents[idx] = incident;
+      }
+      if (state.activePanelTab === 'incidents') {
+        renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
+      }
+    }
+  } else if (msg.type === 'INCIDENT_RESOLVED') {
+    const incident = msg.incident;
+    if (incident && incident.incidentId) {
+      state.activeIncidents = state.activeIncidents.filter(i => i.incidentId !== incident.incidentId);
+      const existsInHistory = state.incidentHistory.find(i => i.incidentId === incident.incidentId);
+      if (!existsInHistory) {
+        state.incidentHistory.unshift(incident);
+      }
+      if (state.activePanelTab === 'incidents') {
+        renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
+      } else {
+        updateIncidentBadge();
+      }
+    }
   } else if (msg.type === 'INIT_SYNC') {
     // Sinkronisasi awal saat WS connect - hitung ulang ringkasan live
     const devs = msg.devices || [];
@@ -785,10 +825,70 @@ function renderDeviceDetail(data, isRefresh = false) {
   document.getElementById('detail-device-type').textContent = data.device.device_type;
   setStatusPill('detail-device-status', data.device.status);
 
-  // System summary cards
-  // Phase 1.5: Last Seen is now displayed as a relative time
-  // (e.g. "5s ago") while the full ISO timestamp is preserved internally
-  // and shown in a title attr for hover inspection.
+  // Updated timestamp
+  const updatedAt = document.getElementById('detail-updated-at');
+  if (updatedAt) {
+    updatedAt.textContent = 'Updated ' + new Date().toLocaleTimeString('id-ID', { hour12: false });
+  }
+
+  // Key metrics row
+  const sys = data.system || {};
+  const latencySummary = data.latency_summary || {};
+  const lossSummary = data.loss_summary || {};
+
+  const keyLatency = document.getElementById('detail-key-latency');
+  if (keyLatency) {
+    keyLatency.textContent = latencySummary.avg ? `${latencySummary.avg} ms` : '--';
+  }
+
+  const keyLoss = document.getElementById('detail-key-loss');
+  if (keyLoss) {
+    keyLoss.textContent = lossSummary.avg ? `${lossSummary.avg}%` : '--';
+    keyLoss.style.color = (lossSummary.avg > 0) ? 'var(--color-warning)' : 'inherit';
+  }
+
+  const keyCpu = document.getElementById('detail-key-cpu');
+  if (keyCpu) {
+    if (sys.cpu_load_pct !== null && sys.cpu_load_pct !== undefined) {
+      keyCpu.textContent = `${parseFloat(sys.cpu_load_pct).toFixed(1)}%`;
+    } else {
+      keyCpu.textContent = 'N/A';
+      keyCpu.style.color = 'var(--text-muted)';
+    }
+  }
+
+  const keyUptime = document.getElementById('detail-key-uptime');
+  if (keyUptime) {
+    keyUptime.textContent = sys.sys_uptime_human || '--';
+  }
+
+  const keyMemory = document.getElementById('detail-key-memory');
+  if (keyMemory && sys.storage_entries && sys.storage_entries.length > 0) {
+    const ram = findRamEntry(sys.storage_entries);
+    if (ram) {
+      const allocUnits = ram.alloc_units || 4096;
+      const usedBytes = (ram.used || 0) * allocUnits;
+      const totalBytes = (ram.size || 0) * allocUnits;
+      if (totalBytes > 0) {
+        const pct = ((usedBytes / totalBytes) * 100).toFixed(0);
+        keyMemory.textContent = `${pct}%`;
+      } else {
+        keyMemory.textContent = '--';
+      }
+    } else {
+      keyMemory.textContent = '--';
+    }
+  } else if (keyMemory) {
+    keyMemory.textContent = '--';
+  }
+
+  const keySnmp = document.getElementById('detail-key-snmp');
+  if (keySnmp) {
+    keySnmp.textContent = data.data_source === 'realtime-snmp' ? 'Direct' : (sys.has_data ? 'InfluxDB' : 'No data');
+    keySnmp.style.color = sys.has_data ? 'var(--color-online)' : 'var(--text-muted)';
+  }
+
+  // Device Info section
   const lastSeenEl = document.getElementById('detail-last-seen');
   if (lastSeenEl) {
     if (data.device.last_seen) {
@@ -808,111 +908,16 @@ function renderDeviceDetail(data, isRefresh = false) {
   document.getElementById('detail-iface-count').textContent = `${ifaceCount} interface${ifaceCount !== 1 ? 's' : ''}`;
   document.getElementById('detail-iface-count-info').textContent = `${ifaceCount} detected`;
 
-  // System metrics
-  const sys = data.system || {};
-  // Phase 1.5: CPU display. On Linux, hrProcessorLoad is often reported as
-  // a value between 0 and 100. If the value is missing (N/A), provide a
-  // helpful hint instead of a blank field, and treat 0 as a valid reading
-  // (do not show N/A when value is exactly 0).
-  const cpuEl = document.getElementById('detail-cpu');
-  if (cpuEl) {
-    if (sys.cpu_load_pct !== null && sys.cpu_load_pct !== undefined) {
-      const cpuNum = parseFloat(sys.cpu_load_pct);
-      cpuEl.textContent = Number.isFinite(cpuNum) ? `${cpuNum.toFixed(1)}%` : 'N/A';
-      cpuEl.title = 'hrProcessorLoad (HOST-RESOURCES-MIB)';
-    } else {
-      cpuEl.textContent = 'N/A (not reported)';
-      cpuEl.title = 'Agent does not report hrProcessorLoad. Configure snmpd extend or install MIB modules.';
-    }
-  }
-  document.getElementById('detail-uptime').textContent = sys.sys_uptime_human || 'N/A';
-
-  // Storage: hrStorageSize and hrStorageUsed are reported in *allocation units*,
-  // not raw bytes. The backend returns `alloc_units` per entry; default to
-  // 4096 (typical Linux page/block size) when missing for backward compatibility.
-  //
-  // Phase 1.5: select the entry whose `descr` (hrStorageDescr) is exactly
-  // "Physical memory". This is the vendor-neutral way to find RAM across
-  // Debian, MikroTik RouterOS, Cisco IOS, etc. Other entries to ignore:
-  // "Available memory", "Cached memory", "Memory buffers", "Swap space",
-  // "/", "/var", and any filesystem path.
-  const memEl = document.getElementById('detail-memory');
-  if (sys.storage_entries && sys.storage_entries.length > 0) {
-    // Exact match first.
-    let primary = sys.storage_entries.find(e =>
-      (e.descr || '').trim().toLowerCase() === 'physical memory'
-    );
-    // Some agents use other phrasings; fall back to a small allowlist.
-    // MikroTik RouterOS reports "main memory" (lowercase, single word).
-    if (!primary) {
-      const alt = sys.storage_entries.find(e => {
-        const d = (e.descr || '').trim().toLowerCase();
-        return d === 'main memory' || d === 'ram' ||
-               d === 'real memory' || d === 'system memory';
-      });
-      primary = alt;
-    }
-    if (!primary) {
-      // No labelled RAM entry found — fall back to the RAM OID
-      // (.1.3.6.1.2.1.25.2.1.2) then to fixed disk, then largest entry.
-      const OID_RAM = '.1.3.6.1.2.1.25.2.1.2';
-      const OID_FIXED = '.1.3.6.1.2.1.25.2.1.4';
-      primary = sys.storage_entries.find(e => e.storage_type === OID_RAM);
-      if (!primary) {
-        primary = sys.storage_entries.find(e => e.storage_type === OID_FIXED);
-      }
-      if (!primary) {
-        primary = sys.storage_entries[0];
-        for (const e of sys.storage_entries) {
-          if ((e.size || 0) > (primary.size || 0)) primary = e;
-        }
-      }
-    }
-    const allocUnits = primary.alloc_units || 4096;
-    let usedBytes = (primary.used || 0) * allocUnits;
-    let totalBytes = (primary.size || 0) * allocUnits;
-    // Defensive: on some agents (notably Debian snmpd), `hrStorageUsed` for
-    // Physical memory can be reported as larger than `hrStorageSize` because
-    // the kernel accounts shared memory / buffers in both. When the larger
-    // value is non-zero and the smaller is non-zero, treat the larger as
-    // total. This is the universally safe interpretation: total >= used.
-    if (totalBytes > 0 && usedBytes > 0 && usedBytes > totalBytes) {
-      const swap = usedBytes; usedBytes = totalBytes; totalBytes = swap;
-    }
-    if (totalBytes > 0) {
-      const fmt = (b) => {
-        if (b >= 1024 ** 3) return `${(b / 1024 ** 3).toFixed(2)} GB`;
-        if (b >= 1024 ** 2) return `${(b / 1024 ** 2).toFixed(0)} MB`;
-        if (b >= 1024)      return `${(b / 1024).toFixed(0)} KB`;
-        return `${b} B`;
-      };
-      const pct = ((usedBytes / totalBytes) * 100).toFixed(1);
-      memEl.textContent = `${fmt(usedBytes)} / ${fmt(totalBytes)} (${pct}%)`;
-      memEl.title = `Source: ${primary.descr || primary.storage_type || 'unknown'} (${allocUnits} B/unit)`;
-    } else if (usedBytes > 0) {
-      const fmt = (b) => {
-        if (b >= 1024 ** 3) return `${(b / 1024 ** 3).toFixed(2)} GB`;
-        if (b >= 1024 ** 2) return `${(b / 1024 ** 2).toFixed(0)} MB`;
-        if (b >= 1024)      return `${(b / 1024).toFixed(0)} KB`;
-        return `${b} B`;
-      };
-      memEl.textContent = `${fmt(usedBytes)} used`;
-      memEl.title = `Source: ${primary.descr || primary.storage_type || 'unknown'} (${allocUnits} B/unit)`;
-    } else {
-      memEl.textContent = 'N/A';
-      memEl.title = '';
-    }
-  } else {
-    memEl.textContent = 'N/A';
-    memEl.title = '';
+  // Traffic freshness
+  const trafficFreshness = document.getElementById('detail-traffic-freshness');
+  if (trafficFreshness && data.generated_at) {
+    const genDate = new Date(data.generated_at);
+    trafficFreshness.textContent = `Source: ${data.data_source === 'realtime-snmp' ? 'Direct SNMP' : 'InfluxDB'} • Updated ${formatTimeAgo(genDate)}`;
   }
 
-  // Show note if system metrics incomplete
-  const noteEl = document.getElementById('detail-system-note');
-  if (noteEl) {
-    const hasSystemData = sys.has_data && (sys.cpu_load_pct !== null || sys.sys_uptime_ticks !== null || (sys.storage_entries || []).length > 0);
-    noteEl.style.display = hasSystemData ? 'none' : 'block';
-  }
+  // RTT and Loss max values
+  document.getElementById('detail-rtt-avg').textContent = latencySummary.avg || '--';
+  document.getElementById('detail-loss-max').textContent = lossSummary.max || '--';
 
   // Interface table
   renderInterfaceTable(data);
@@ -920,23 +925,151 @@ function renderDeviceDetail(data, isRefresh = false) {
   // Interface selector for throughput chart
   populateDetailIfaceSelect(data);
 
-  // RTT + loss mini-stats
-  const ls = data.latency_summary || {};
-  document.getElementById('detail-rtt-avg').textContent = `${ls.avg || 0} ms`;
-  document.getElementById('detail-rtt-min').textContent = `${ls.min || 0} ms`;
-  document.getElementById('detail-rtt-max').textContent = `${ls.max || 0} ms`;
-  document.getElementById('detail-rtt-jitter').textContent = `${ls.jitter || 0} ms`;
-
-  const lossS = data.loss_summary || {};
-  document.getElementById('detail-loss-avg').textContent = `${lossS.avg || 0} %`;
-  document.getElementById('detail-loss-max').textContent = `${lossS.max || 0} %`;
-  document.getElementById('detail-loss-samples').textContent = lossS.samples || 0;
-
   // Charts (init if not yet, otherwise just update)
   if (!isRefresh) {
     initDetailCharts();
   }
   updateDetailCharts(data);
+
+  // Load events for this device
+  loadDeviceEvents(data.device.id);
+
+  // Check for active incident
+  updateDetailIncidentSection(data.device.id);
+
+  // Load incident history
+  loadDeviceHistory(data.device.id);
+}
+
+function findRamEntry(storageEntries) {
+  let primary = storageEntries.find(e =>
+    (e.descr || '').trim().toLowerCase() === 'physical memory'
+  );
+  if (!primary) {
+    const alt = storageEntries.find(e => {
+      const d = (e.descr || '').trim().toLowerCase();
+      return d === 'main memory' || d === 'ram' || d === 'real memory' || d === 'system memory';
+    });
+    primary = alt;
+  }
+  if (!primary) {
+    const OID_RAM = '.1.3.6.1.2.1.25.2.1.2';
+    const OID_FIXED = '.1.3.6.1.2.1.25.2.1.4';
+    primary = storageEntries.find(e => e.storage_type === OID_RAM);
+    if (!primary) primary = storageEntries.find(e => e.storage_type === OID_FIXED);
+    if (!primary) primary = storageEntries[0];
+    for (const e of storageEntries) {
+      if ((e.size || 0) > (primary.size || 0)) primary = e;
+    }
+  }
+  return primary;
+}
+
+async function loadDeviceEvents(deviceId) {
+  const container = document.getElementById('detail-events-list');
+  if (!container) return;
+
+  try {
+    const params = new URLSearchParams({ deviceId: deviceId, limit: '10' });
+    const res = await fetch(`/api/events?${params.toString()}`).then(r => r.json());
+    if (!res.success || !res.events || res.events.length === 0) {
+      container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">No recent events</div>';
+      return;
+    }
+
+    container.innerHTML = res.events.map(e => {
+      const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--';
+      const sevClass = e.severity || 'info';
+      return `
+        <div class="deeplink-event-row" data-device-id="${e.device_id}">
+          <span class="deeplink-event-time">${time}</span>
+          <span class="deeplink-event-type ${sevClass}">${e.event_type || 'EVENT'}</span>
+          <span class="deeplink-event-device">${e.device_name || 'Unknown'}</span>
+        </div>
+      `;
+    }).join('');
+
+    container.querySelectorAll('.deeplink-event-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const devId = row.dataset.deviceId;
+        const activeForDevice = state.activeIncidents.find(i => i.deviceId == devId);
+        if (activeForDevice) {
+          openIncidentDrawerById(activeForDevice.incidentId);
+        }
+      });
+    });
+  } catch (err) {
+    container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">Failed to load events</div>';
+  }
+}
+
+async function updateDetailIncidentSection(deviceId) {
+  const section = document.getElementById('detail-incident-section');
+  const summary = document.getElementById('detail-incident-summary');
+  if (!section || !summary) return;
+
+  const activeForDevice = state.activeIncidents.find(i => i.deviceId == deviceId);
+  if (!activeForDevice) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = 'block';
+  const startTime = activeForDevice.startedAt ? new Date(activeForDevice.startedAt).toLocaleString('id-ID', { hour12: false }) : '--';
+  summary.innerHTML = `
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+      <span class="alert-severity-badge ${activeForDevice.currentSeverity}" style="font-size:0.7rem;">${(activeForDevice.currentSeverity || 'unknown').toUpperCase()}</span>
+      <span style="color:var(--text-primary);font-weight:600;">${activeForDevice.rootCause?.message || 'Incident'}</span>
+      <span style="color:var(--text-muted);font-size:0.7rem;">Started ${startTime}</span>
+    </div>
+  `;
+}
+
+async function loadDeviceHistory(deviceId) {
+  const container = document.getElementById('detail-history-list');
+  if (!container) return;
+
+  try {
+    const res = await fetch(`/api/incidents`).then(r => r.json());
+    if (!res.success) {
+      container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">Failed to load history</div>';
+      return;
+    }
+
+    const deviceHistory = (res.history || []).filter(i => i.deviceId == deviceId);
+    const activeForDevice = state.activeIncidents.find(i => i.deviceId == deviceId);
+
+    const allHistory = [...activeForDevice ? [activeForDevice] : [], ...deviceHistory].slice(0, 10);
+
+    if (allHistory.length === 0) {
+      container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">No incident history</div>';
+      return;
+    }
+
+    container.innerHTML = allHistory.map(inc => {
+      const startTime = inc.startedAt ? new Date(inc.startedAt).toLocaleString('id-ID', { hour12: false }) : '--';
+      const duration = inc.durationMs ? formatDuration(inc.durationMs) : (inc.status === 'active' ? 'Active' : '--');
+      const sevClass = inc.currentSeverity || 'info';
+      const statusClass = inc.status === 'resolved' ? 'resolved' : 'active';
+      return `
+        <div class="deeplink-event-row" data-incident-id="${inc.incidentId}">
+          <span class="alert-severity-badge ${sevClass}" style="font-size:0.6rem;">${(inc.currentSeverity || 'info').toUpperCase()}</span>
+          <span class="deeplink-event-device" style="flex:1;">${inc.rootCause?.message || 'Incident'}</span>
+          <span style="font-size:0.65rem;color:var(--text-muted);">${startTime}</span>
+          <span class="alert-status-pill ${statusClass}" style="font-size:0.6rem;">${inc.status || 'active'}</span>
+        </div>
+      `;
+    }).join('');
+
+    container.querySelectorAll('.deeplink-event-row[data-incident-id]').forEach(row => {
+      row.addEventListener('click', () => {
+        const id = row.dataset.incidentId;
+        if (id) openIncidentDrawerById(id);
+      });
+    });
+  } catch (err) {
+    container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">Failed to load history</div>';
+  }
 }
 
 function renderInterfaceTable(data) {
@@ -949,29 +1082,22 @@ function renderInterfaceTable(data) {
   (data.error_counters || []).forEach(p => { errByName[p.interface_name] = p; });
 
   if (ifaces.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--text-muted);">No interfaces discovered via SNMP yet</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:16px; color:var(--text-muted);">No interfaces discovered via SNMP yet</td></tr>`;
     return;
   }
 
   tbody.innerHTML = ifaces.map(i => {
     const rate = ratesByName[i.interface_name] || {};
     const err = errByName[i.interface_name] || {};
-    // Normalize status from realtime-snmp (oper_status=1) or DB (oper_status_label)
     let statusLabel = i.oper_status_label;
     if (!statusLabel && i.oper_status !== undefined && i.oper_status !== null) {
       statusLabel = (i.oper_status === 1) ? 'up' : (i.oper_status === 2 ? 'down' : 'unknown');
     } else if (!statusLabel) {
-      statusLabel = i.status || 'up'; // realtime fallback
+      statusLabel = i.status || 'up';
     }
     const statusClass = statusLabel;
-    // Phase 1.5: loopback interfaces report a meaningless speed (often 10
-    // Mbps from the agent default). Treat any interface named `lo`, `lo0`,
-    // `Loopback*`, or `null0` as virtual and display a dash instead of a
-    // misleading physical speed.
     const ifname = (i.interface_name || '').toLowerCase();
-    const isVirtual = ifname === 'lo' || ifname === 'lo0' ||
-                      ifname.startsWith('lo:') || ifname.startsWith('loopback') ||
-                      ifname === 'null0' || ifname.startsWith('null');
+    const isVirtual = ifname === 'lo' || ifname === 'lo0' || ifname.startsWith('lo:') || ifname.startsWith('loopback') || ifname === 'null0' || ifname.startsWith('null');
     let speedMbps;
     if (isVirtual) {
       speedMbps = '— Virtual';
@@ -980,15 +1106,17 @@ function renderInterfaceTable(data) {
     } else {
       speedMbps = '--';
     }
+    const inMbps = rate.in_mbps != null ? rate.in_mbps.toFixed(2) : '--';
+    const outMbps = rate.out_mbps != null ? rate.out_mbps.toFixed(2) : '--';
+    const totalErrors = (err.ifInErrors || 0) + (err.ifOutErrors || 0);
     return `
       <tr>
         <td>${i.interface_name}</td>
         <td><span class="iface-status ${statusClass}">${statusLabel.toUpperCase()}</span></td>
         <td>${speedMbps}</td>
-        <td>${(rate.pps_in || 0).toFixed(0)}</td>
-        <td>${(rate.pps_out || 0).toFixed(0)}</td>
-        <td style="color:${(err.ifInErrors || 0) > 0 ? 'var(--color-offline)' : 'inherit'}">${err.ifInErrors || 0}</td>
-        <td style="color:${(err.ifOutErrors || 0) > 0 ? 'var(--color-offline)' : 'inherit'}">${err.ifOutErrors || 0}</td>
+        <td style="font-family:var(--font-mono);font-size:0.8rem;">${inMbps}</td>
+        <td style="font-family:var(--font-mono);font-size:0.8rem;">${outMbps}</td>
+        <td style="color:${totalErrors > 0 ? 'var(--color-offline)' : 'inherit'}">${totalErrors}</td>
       </tr>
     `;
   }).join('');
@@ -1190,7 +1318,16 @@ function renderAlertFeed(searchQuery = '', sevFilter = 'all') {
     `;
 
     item.addEventListener('click', () => {
-      openIncidentDrawer(alert);
+      if (alert.incidentId) {
+        openIncidentDrawerById(alert.incidentId);
+      } else {
+        const activeForDevice = state.activeIncidents.find(i => i.deviceId === alert.device_id);
+        if (activeForDevice) {
+          openIncidentDrawerById(activeForDevice.incidentId);
+        } else {
+          openIncidentDrawer(alert);
+        }
+      }
     });
 
     container.appendChild(item);
@@ -1259,6 +1396,14 @@ function renderIncidentFeed(searchQuery = '', sevFilter = 'all') {
     container.appendChild(item);
   });
 
+  const activeCount = state.activeIncidents.length;
+  const panelCountEl = document.getElementById('panel-incidents-count');
+  const navBadgeEl = document.getElementById('nav-alert-counter');
+  if (panelCountEl) panelCountEl.textContent = activeCount;
+  if (navBadgeEl) navBadgeEl.textContent = activeCount;
+}
+
+function updateIncidentBadge() {
   const activeCount = state.activeIncidents.length;
   const panelCountEl = document.getElementById('panel-incidents-count');
   const navBadgeEl = document.getElementById('nav-alert-counter');
@@ -1362,12 +1507,6 @@ function renderIncidentDrawerContent(data) {
 
   const rcMessageEl = document.getElementById('inc-rc-message');
   if (rcMessageEl) rcMessageEl.textContent = title;
-
-  const rcThresholdEl = document.getElementById('inc-rc-threshold');
-  if (rcThresholdEl) rcThresholdEl.textContent = data.rootCause?.threshold != null ? String(data.rootCause.threshold) : '--';
-
-  const rcObservedEl = document.getElementById('inc-rc-observed');
-  if (rcObservedEl) rcObservedEl.textContent = data.rootCause?.observed != null ? String(data.rootCause.observed) : '--';
 
   const evLatencyEl = document.getElementById('inc-ev-latency');
   if (evLatencyEl) evLatencyEl.textContent = data.evidence?.maxLatency != null ? `${data.evidence.maxLatency} ms` : '--';
@@ -1576,6 +1715,8 @@ function setupEventListeners() {
       if (contentEl) contentEl.classList.add('active');
 
       if (tabName === 'quickstats') updateQuickStats();
+    if (tabName === 'incidents') renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
+    if (tabName === 'alerts') renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
 
       if (tabName === 'analytics') {
         // Charts need visible container — lazy-init on first open
@@ -1887,7 +2028,7 @@ function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
     const statusClass = status === 'resolved' ? 'resolved' : 'active';
 
     return `
-      <tr>
+      <tr data-incident-id="${a.incidentId}" style="cursor:pointer;">
         <td>
           <span class="alert-severity-badge ${sevClass}">
             <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;"></span>
@@ -1912,6 +2053,13 @@ function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
       </tr>
     `;
   }).join('');
+
+  tbody.querySelectorAll('tr[data-incident-id]').forEach(row => {
+    row.addEventListener('click', () => {
+      const id = row.dataset.incidentId;
+      if (id) openIncidentDrawerById(id);
+    });
+  });
 }
 
 function formatDuration(ms) {
@@ -2233,6 +2381,66 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
     loadTelegrafStatus();
     // Load InfluxDB connectivity status
     loadInfluxStatus();
+  } else if (view === 'activity') {
+    titleEl.textContent = 'Activity Log';
+    subtitleEl.textContent = 'Real-time device event stream from polling agents';
+    container.innerHTML = `
+      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:16px;">
+        <div class="alerts-page-toolbar" style="margin-bottom:12px;">
+          <div class="alerts-page-search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="activity-search-input" placeholder="Search events...">
+          </div>
+          <div style="display:flex; gap:8px;">
+            <select id="activity-severity-filter" style="background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:6px; padding:4px 8px; font-size:0.75rem; color:var(--text-primary);">
+              <option value="all">All Severity</option>
+              <option value="critical">Critical</option>
+              <option value="warning">Warning</option>
+              <option value="info">Info</option>
+            </select>
+            <select id="activity-device-filter" style="background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:6px; padding:4px 8px; font-size:0.75rem; color:var(--text-primary);">
+              <option value="all">All Devices</option>
+            </select>
+          </div>
+        </div>
+        <div class="alerts-table-wrap" style="max-height:calc(100vh - 280px);">
+          <table class="alerts-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Device</th>
+                <th>Event</th>
+                <th>Severity</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody id="activity-tbody">
+              <tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-muted);">Loading activity...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    setTimeout(() => {
+      const searchInput = document.getElementById('activity-search-input');
+      const sevFilter = document.getElementById('activity-severity-filter');
+      const deviceFilter = document.getElementById('activity-device-filter');
+
+      if (searchInput) {
+        searchInput.addEventListener('input', () => loadActivityEvents(deviceFilter?.value || 'all', sevFilter?.value || 'all', searchInput.value));
+      }
+      if (sevFilter) {
+        sevFilter.addEventListener('change', () => loadActivityEvents(deviceFilter?.value || 'all', sevFilter.value, searchInput?.value || ''));
+      }
+      if (deviceFilter) {
+        deviceFilter.addEventListener('change', () => loadActivityEvents(deviceFilter.value, sevFilter?.value || 'all', searchInput?.value || ''));
+        const devs = state.devices || [];
+        deviceFilter.innerHTML = '<option value="all">All Devices</option>' + devs.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+      }
+
+      loadActivityEvents('all', 'all', '');
+    }, 0);
   }
 }
 
@@ -2552,6 +2760,70 @@ window.saveSettings = async function() {
 };
 
 /**
+ * Load activity events from /api/events with filters
+ */
+async function loadActivityEvents(deviceId = 'all', severity = 'all', search = '') {
+  const tbody = document.getElementById('activity-tbody');
+  if (!tbody) return;
+
+  try {
+    const params = new URLSearchParams();
+    if (deviceId !== 'all') params.set('deviceId', deviceId);
+    if (severity !== 'all') params.set('severity', severity);
+    params.set('limit', '100');
+
+    const res = await fetch(`/api/events?${params.toString()}`).then(r => r.json());
+    if (!res.success || !res.events) {
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-muted);">Failed to load events</td></tr>`;
+      return;
+    }
+
+    let events = res.events;
+    if (search) {
+      const q = search.toLowerCase();
+      events = events.filter(e =>
+        (e.device_name || '').toLowerCase().includes(q) ||
+        (e.event_type || '').toLowerCase().includes(q) ||
+        (e.severity || '').toLowerCase().includes(q) ||
+        (e.value != null ? String(e.value).toLowerCase().includes(q) : false)
+      );
+    }
+
+    if (events.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-muted);">No events match your filter</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = events.map(e => {
+      const sevClass = e.severity || 'info';
+      const time = e.timestamp ? new Date(e.timestamp).toLocaleString('id-ID', { hour12: false }) : '--';
+      return `
+        <tr data-device-id="${e.device_id}" style="cursor:pointer;">
+          <td class="alert-time-cell">${time}</td>
+          <td>${e.device_name || 'Unknown'}</td>
+          <td>${e.event_type || 'UNKNOWN'}</td>
+          <td><span class="alert-severity-badge ${sevClass}">${(e.severity || 'info').toUpperCase()}</span></td>
+          <td>${e.value != null ? e.value : '--'}</td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('tr[data-device-id]').forEach(row => {
+      row.addEventListener('click', () => {
+        const devId = row.dataset.deviceId;
+        const activeForDevice = state.activeIncidents.find(i => i.deviceId == devId);
+        if (activeForDevice) {
+          openIncidentDrawerById(activeForDevice.incidentId);
+        }
+      });
+    });
+  } catch (err) {
+    console.error('Failed to load activity events:', err);
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-muted);">Error loading events</td></tr>`;
+  }
+}
+
+/**
  * Load data riil untuk Reports view dari endpoint /api/reports/sla
  */
 async function loadReportsData() {
@@ -2569,9 +2841,15 @@ async function loadReportsData() {
     const lossSrc = document.getElementById('reports-loss-src');
 
     if (slaText) {
-      const pct = parseFloat(res.sla_30d);
-      slaText.textContent = `${isFinite(pct) ? pct.toFixed(2) : '100.00'}%`;
-      slaText.style.color = pct >= 99 ? 'var(--color-online)' : (pct >= 95 ? 'var(--color-warning)' : 'var(--color-offline)');
+      const fromDb = res.daily_breakdown && res.daily_breakdown.length > 0;
+      if (fromDb) {
+        const pct = parseFloat(res.sla_30d);
+        slaText.textContent = `${isFinite(pct) ? pct.toFixed(2) : '0.00'}%`;
+        slaText.style.color = pct >= 99 ? 'var(--color-online)' : (pct >= 95 ? 'var(--color-warning)' : 'var(--color-offline)');
+      } else {
+        slaText.textContent = 'Not enough historical data';
+        slaText.style.color = 'var(--text-muted)';
+      }
     }
     if (sourceEl) {
       const fromDb = res.daily_breakdown && res.daily_breakdown.length > 0;
@@ -2580,12 +2858,14 @@ async function loadReportsData() {
         : 'Calculated from current device status (history not yet populated)';
     }
     if (ingestionEl) {
-      ingestionEl.textContent = Number(res.total_ingestion_24h).toLocaleString('id-ID');
+      ingestionEl.textContent = res.influx_has_ingestion
+        ? Number(res.total_ingestion_24h).toLocaleString('id-ID')
+        : '--';
     }
     if (ingestionSrc) {
-      ingestionSrc.textContent = res.influx_has_data
+      ingestionSrc.textContent = res.influx_has_ingestion
         ? 'Source: InfluxDB count() over last 24h'
-        : 'Source: estimate from device count × fields (InfluxDB empty)';
+        : 'No InfluxDB ingestion data';
     }
     if (latEl) {
       latEl.textContent = `${parseFloat(res.avg_latency_ms).toFixed(2)} ms`;

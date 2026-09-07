@@ -47,6 +47,10 @@
             Alerts
             <span class="nav-badge" id="nav-alert-counter">0</span>
           </li>
+          <li class="nav-item" data-view="activity" id="nav-activity">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            Activity
+          </li>
           <li class="nav-item" data-view="reports" id="nav-reports">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
             Reports
@@ -411,13 +415,18 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"></polyline></svg>
           </button>
           <div>
-            <h2 id="detail-device-name">Loading…</h2>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <h2 id="detail-device-name">Loading…</h2>
+              <span id="detail-live-indicator" class="status-pill" style="font-size:0.6rem;padding:2px 6px;"></span>
+            </div>
             <div class="deeplink-meta">
               <span id="detail-device-ip">--</span>
               <span class="deeplink-meta-sep">•</span>
               <span id="detail-device-type">--</span>
               <span class="deeplink-meta-sep">•</span>
               <span class="status-pill" id="detail-device-status">--</span>
+              <span class="deeplink-meta-sep">•</span>
+              <span id="detail-updated-at" style="font-size:0.65rem;color:var(--text-muted);">--</span>
             </div>
           </div>
         </div>
@@ -425,142 +434,161 @@
       </div>
 
       <div class="deeplink-body" id="device-detail-body">
-        <!-- SECTION 1: Traffic & Interfaces -->
+        <!-- SECTION 1: Key Metrics Row -->
         <section class="deeplink-section">
-          <div class="deeplink-section-title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-            <h3>Traffic & Interface Throughput</h3>
-            <span class="deeplink-hint">Sliding 5-minute window per-interface</span>
-          </div>
-
-          <div class="deeplink-grid-2">
-            <div class="deeplink-card">
-              <div class="deeplink-card-header">
-                <h4>Throughput History (5m)</h4>
-                <select id="detail-interface-select" class="select-interface"></select>
-              </div>
-              <div class="chart-canvas-wrap" style="min-height: 200px;">
-                <canvas id="detailThroughputChart"></canvas>
-              </div>
+          <div class="deeplink-metrics-row">
+            <div class="deeplink-metric-item">
+              <span class="deeplink-metric-label">Latency</span>
+              <span class="deeplink-metric-value" id="detail-key-latency">--</span>
             </div>
-
-            <div class="deeplink-card">
-              <div class="deeplink-card-header">
-                <h4>Interface Status Table</h4>
-                <span class="deeplink-hint" id="detail-iface-count">-- interfaces</span>
-              </div>
-              <div class="deeplink-table-wrap">
-                <table class="deeplink-table">
-                  <thead>
-                    <tr>
-                      <th>Interface</th>
-                      <th>Status</th>
-                      <th>Speed</th>
-                      <th>PPS In</th>
-                      <th>PPS Out</th>
-                      <th>Err In</th>
-                      <th>Err Out</th>
-                    </tr>
-                  </thead>
-                  <tbody id="detail-iface-tbody">
-                      <tr><td colspan="7" style="text-align:center; padding:20px; color:var(--text-muted);">Loading…</td></tr>
-                  </tbody>
-                </table>
-              </div>
+            <div class="deeplink-metric-item">
+              <span class="deeplink-metric-label">Packet Loss</span>
+              <span class="deeplink-metric-value" id="detail-key-loss">--</span>
+            </div>
+            <div class="deeplink-metric-item">
+              <span class="deeplink-metric-label">CPU</span>
+              <span class="deeplink-metric-value" id="detail-key-cpu">--</span>
+            </div>
+            <div class="deeplink-metric-item">
+              <span class="deeplink-metric-label">Uptime</span>
+              <span class="deeplink-metric-value" id="detail-key-uptime">--</span>
+            </div>
+            <div class="deeplink-metric-item">
+              <span class="deeplink-metric-label">Memory</span>
+              <span class="deeplink-metric-value" id="detail-key-memory">--</span>
+            </div>
+            <div class="deeplink-metric-item">
+              <span class="deeplink-metric-label">SNMP Status</span>
+              <span class="deeplink-metric-value" id="detail-key-snmp">--</span>
             </div>
           </div>
         </section>
 
-        <!-- SECTION 2: Network Quality -->
+        <!-- SECTION 2: Traffic Chart -->
         <section class="deeplink-section">
           <div class="deeplink-section-title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-            <h3>Network Quality (RTT, Jitter, Packet Loss)</h3>
-            <span class="deeplink-hint">5-minute ICMP history @ 5s resolution</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            <h3>Traffic</h3>
+            <select id="detail-interface-select" class="select-interface" style="margin-left:auto;"></select>
           </div>
+          <div class="chart-canvas-wrap" style="min-height:160px;">
+            <canvas id="detailThroughputChart"></canvas>
+          </div>
+          <div id="detail-traffic-freshness" class="deeplink-freshness"></div>
+        </section>
 
-          <div class="deeplink-grid-2">
-            <div class="deeplink-card">
-              <div class="deeplink-card-header">
-                <h4>Round-Trip Time (ms)</h4>
-                <div class="deeplink-legend">
-                  <span class="legend-dot min"></span>min
-                  <span class="legend-dot avg"></span>avg
-                  <span class="legend-dot max"></span>max
-                </div>
+        <!-- SECTION 3: RTT and Loss Charts -->
+        <section class="deeplink-section">
+          <div class="deeplink-section-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+            <h3>Network Quality</h3>
+          </div>
+          <div class="deeplink-grid-2" style="gap:10px;">
+            <div>
+              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);margin-bottom:6px;">
+                <span>RTT</span>
+                <span>Avg <strong id="detail-rtt-avg" style="color:var(--text-primary);">--</strong> ms</span>
               </div>
-              <div class="chart-canvas-wrap" style="min-height: 200px;">
+              <div class="chart-canvas-wrap" style="min-height:120px;">
                 <canvas id="detailRttChart"></canvas>
               </div>
-              <div class="deeplink-mini-stats" id="detail-rtt-stats">
-                <div><span>Avg</span><strong id="detail-rtt-avg">-- ms</strong></div>
-                <div><span>Min</span><strong id="detail-rtt-min">-- ms</strong></div>
-                <div><span>Max</span><strong id="detail-rtt-max">-- ms</strong></div>
-                <div><span>Jitter</span><strong id="detail-rtt-jitter">-- ms</strong></div>
-              </div>
             </div>
-
-            <div class="deeplink-card">
-              <div class="deeplink-card-header">
-                <h4>Packet Loss (%)</h4>
-                <span class="deeplink-hint">5s aggregated mean</span>
+            <div>
+              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);margin-bottom:6px;">
+                <span>Packet Loss</span>
+                <span>Max <strong id="detail-loss-max" style="color:var(--text-primary);">--</strong>%</span>
               </div>
-              <div class="chart-canvas-wrap" style="min-height: 200px;">
+              <div class="chart-canvas-wrap" style="min-height:120px;">
                 <canvas id="detailLossChart"></canvas>
-              </div>
-              <div class="deeplink-mini-stats" id="detail-loss-stats">
-                <div><span>Avg Loss</span><strong id="detail-loss-avg">-- %</strong></div>
-                <div><span>Max Loss</span><strong id="detail-loss-max">-- %</strong></div>
-                <div><span>Samples</span><strong id="detail-loss-samples">--</strong></div>
               </div>
             </div>
           </div>
         </section>
 
-        <!-- SECTION 3: System Summary -->
+        <!-- SECTION 4: Active Incident -->
+        <section class="deeplink-section" id="detail-incident-section" style="display:none;">
+          <div class="deeplink-section-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>
+            <h3>Active Incident</h3>
+          </div>
+          <div class="deeplink-incident-summary" id="detail-incident-summary"></div>
+        </section>
+
+        <!-- SECTION 5: Interfaces -->
         <section class="deeplink-section">
           <div class="deeplink-section-title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
-            <h3>System Summary &amp; Inventory</h3>
-            <span class="deeplink-hint">Hardware &amp; SNMP configuration</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+            <h3>Interfaces</h3>
+            <span id="detail-iface-count" class="deeplink-hint" style="margin-left:auto;">--</span>
           </div>
+          <div class="deeplink-table-wrap">
+            <table class="deeplink-table">
+              <thead>
+                <tr>
+                  <th>Interface</th>
+                  <th>Status</th>
+                  <th>Speed</th>
+                  <th>RX Mbps</th>
+                  <th>TX Mbps</th>
+                  <th>Errors</th>
+                </tr>
+              </thead>
+              <tbody id="detail-iface-tbody">
+                <tr><td colspan="6" style="text-align:center; padding:16px; color:var(--text-muted);">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
 
-          <div class="deeplink-info-grid" id="detail-system-grid">
-            <div class="deeplink-info-card">
+        <!-- SECTION 6: Recent Events -->
+        <section class="deeplink-section">
+          <div class="deeplink-section-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            <h3>Recent Events</h3>
+          </div>
+          <div id="detail-events-list" class="deeplink-events-list">
+            <div style="text-align:center;padding:16px;color:var(--text-muted);">Loading events...</div>
+          </div>
+        </section>
+
+        <!-- SECTION 7: Device Info -->
+        <section class="deeplink-section">
+          <div class="deeplink-section-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line></svg>
+            <h3>Device Info</h3>
+          </div>
+          <div class="deeplink-info-grid-compact">
+            <div class="deeplink-info-row">
               <span class="deeplink-info-label">Last Seen</span>
               <span class="deeplink-info-value" id="detail-last-seen">--</span>
             </div>
-            <div class="deeplink-info-card">
-              <span class="deeplink-info-label">Polling Interval</span>
+            <div class="deeplink-info-row">
+              <span class="deeplink-info-label">Polling</span>
               <span class="deeplink-info-value" id="detail-poll-interval">--</span>
             </div>
-            <div class="deeplink-info-card">
+            <div class="deeplink-info-row">
               <span class="deeplink-info-label">SNMP Community</span>
               <span class="deeplink-info-value" id="detail-snmp-comm">--</span>
             </div>
-            <div class="deeplink-info-card">
+            <div class="deeplink-info-row">
               <span class="deeplink-info-label">SNMP Port</span>
               <span class="deeplink-info-value" id="detail-snmp-port">--</span>
             </div>
-            <div class="deeplink-info-card">
-              <span class="deeplink-info-label">Detected Interfaces</span>
+            <div class="deeplink-info-row">
+              <span class="deeplink-info-label">Interfaces</span>
               <span class="deeplink-info-value" id="detail-iface-count-info">--</span>
             </div>
-            <div class="deeplink-info-card">
-              <span class="deeplink-info-label">CPU Load</span>
-              <span class="deeplink-info-value" id="detail-cpu">--</span>
-            </div>
-            <div class="deeplink-info-card">
-              <span class="deeplink-info-label">System Uptime</span>
-              <span class="deeplink-info-value" id="detail-uptime">--</span>
-            </div>
-            <div class="deeplink-info-card">
-              <span class="deeplink-info-label">Memory / Storage</span>
-              <span class="deeplink-info-value" id="detail-memory">--</span>
-            </div>
           </div>
-          <div id="detail-system-note" class="deeplink-note" style="display:none;">
-            Some system metrics (CPU, Memory, Uptime) require the Telegraf agent to poll HOST-RESOURCES-MIB and DISMAN-EVENT-MIB OIDs. After updating config, restart Telegraf to start ingesting.
+        </section>
+
+        <!-- SECTION 8: Device History -->
+        <section class="deeplink-section">
+          <div class="deeplink-section-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+            <h3>Incident History</h3>
+          </div>
+          <div id="detail-history-list" class="deeplink-events-list">
+            <div style="text-align:center;padding:16px;color:var(--text-muted);">Loading history...</div>
           </div>
         </section>
       </div>
@@ -674,10 +702,6 @@
           <div class="incident-section-title">Root Cause</div>
           <div class="incident-root-cause" id="incident-root-cause">
             <div class="incident-rc-message" id="inc-rc-message">--</div>
-            <div class="incident-rc-details" id="inc-rc-details">
-              <span class="incident-rc-threshold">Threshold: <strong id="inc-rc-threshold">--</strong></span>
-              <span class="incident-rc-observed">Observed: <strong id="inc-rc-observed">--</strong></span>
-            </div>
           </div>
         </div>
 
