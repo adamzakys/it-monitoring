@@ -767,6 +767,8 @@ function updateInterfaceDropdown() {
 function openDeviceDetail(deviceId) {
   const backdrop = document.getElementById('device-detail-backdrop');
   if (!backdrop) return;
+  const mainViewport = document.querySelector('.main-viewport');
+  if (mainViewport) mainViewport.classList.add('device-detail-open');
   backdrop.classList.add('active');
   document.body.style.overflow = 'hidden';
 
@@ -782,22 +784,52 @@ function openDeviceDetail(deviceId) {
   // Auto-refresh every 5s while panel is open
   if (state.detailPollingTimer) clearInterval(state.detailPollingTimer);
   state.detailPollingTimer = setInterval(function() { loadDeviceDetail(deviceId, true); }, 5000);
+
+  // Add escape key handler
+  if (!state.detailEscapeHandler) {
+    state.detailEscapeHandler = (e) => {
+      if (e.key === 'Escape') closeDeviceDetail();
+    };
+    document.addEventListener('keydown', state.detailEscapeHandler);
+  }
+}
+
+function toggleSection(contentId, iconId) {
+  const content = document.getElementById(contentId);
+  const icon = iconId ? document.getElementById(iconId) : null;
+  if (!content) return;
+
+  const isCollapsed = content.classList.contains('collapsed');
+  if (isCollapsed) {
+    content.classList.remove('collapsed');
+    if (icon) icon.classList.remove('collapsed');
+  } else {
+    content.classList.add('collapsed');
+    if (icon) icon.classList.add('collapsed');
+  }
 }
 
 function closeDeviceDetail() {
   const backdrop = document.getElementById('device-detail-backdrop');
   if (!backdrop) return;
+  const mainViewport = document.querySelector('.main-viewport');
+  if (mainViewport) mainViewport.classList.remove('device-detail-open');
   backdrop.classList.remove('active');
   document.body.style.overflow = '';
   if (state.detailPollingTimer) {
     clearInterval(state.detailPollingTimer);
     state.detailPollingTimer = null;
   }
-  // Destroy detail charts so they don't leak memory
   if (state.charts.detailThroughput) { state.charts.detailThroughput.destroy(); state.charts.detailThroughput = null; }
   if (state.charts.detailRtt) { state.charts.detailRtt.destroy(); state.charts.detailRtt = null; }
   if (state.charts.detailLoss) { state.charts.detailLoss.destroy(); state.charts.detailLoss = null; }
   state.detailData = null;
+
+  // Remove escape key handler
+  if (state.detailEscapeHandler) {
+    document.removeEventListener('keydown', state.detailEscapeHandler);
+    state.detailEscapeHandler = null;
+  }
 }
 
 function setStatusPill(elementId, status) {
@@ -819,94 +851,144 @@ async function loadDeviceDetail(deviceId, isRefresh = false) {
 }
 
 function renderDeviceDetail(data, isRefresh = false) {
+  const sys = data.system || {};
+  const latencySummary = data.latency_summary || {};
+  const lossSummary = data.loss_summary || {};
+
   // Header
   document.getElementById('detail-device-name').textContent = data.device.name;
   document.getElementById('detail-device-ip').textContent = data.device.ip_address;
-  document.getElementById('detail-device-type').textContent = data.device.device_type;
+  document.getElementById('detail-device-type').textContent = data.device.device_type || '--';
+  document.getElementById('detail-device-vendor').textContent = data.device.vendor || '--';
+  document.getElementById('detail-device-model').textContent = data.device.model || '--';
   setStatusPill('detail-device-status', data.device.status);
+
+  // Device Overview
+  document.getElementById('detail-overview-name').textContent = data.device.name;
+  document.getElementById('detail-overview-ip').textContent = data.device.ip_address;
+  document.getElementById('detail-overview-type').textContent = data.device.device_type || '--';
+  document.getElementById('detail-overview-vendor').textContent = data.device.vendor || '--';
+  document.getElementById('detail-overview-model').textContent = data.device.model || '--';
+  document.getElementById('detail-overview-ros').textContent = data.device.routeros_version || '--';
+  document.getElementById('detail-overview-polling').textContent = `${data.device.polling_interval || 1}s`;
+  const lastSeenEl = document.getElementById('detail-overview-lastseen');
+  if (lastSeenEl && data.device.last_seen) {
+    const seenDate = new Date(data.device.last_seen);
+    lastSeenEl.textContent = formatTimeAgo(seenDate);
+    lastSeenEl.title = seenDate.toLocaleString('id-ID', { hour12: false });
+  } else {
+    lastSeenEl.textContent = '--';
+  }
+
+  // Current Health - Status
+  setStatusPill('detail-health-status', data.device.status);
+  document.getElementById('detail-health-latency').textContent = latencySummary.avg ? `${latencySummary.avg} ms` : '--';
+  document.getElementById('detail-health-loss').textContent = lossSummary.avg ? `${lossSummary.avg}%` : '--';
+  document.getElementById('detail-health-uptime').textContent = sys.sys_uptime_human || '--';
+
+  // Current Health - CPU
+  const cpuEl = document.getElementById('detail-health-cpu');
+  const cpuBar = document.getElementById('detail-health-cpu-bar');
+  if (sys.cpu_load_pct !== null && sys.cpu_load_pct !== undefined) {
+    const cpuVal = parseFloat(sys.cpu_load_pct).toFixed(1);
+    cpuEl.textContent = `${cpuVal}%`;
+    if (cpuBar) cpuBar.style.width = `${cpuVal}%`;
+  } else {
+    cpuEl.textContent = 'N/A';
+    if (cpuBar) cpuBar.style.width = '0%';
+  }
+
+  // Current Health - Memory
+  const memEl = document.getElementById('detail-health-memory');
+  const memBar = document.getElementById('detail-health-memory-bar');
+  if (sys.storage_entries && sys.storage_entries.length > 0) {
+    const ram = findRamEntry(sys.storage_entries);
+    if (ram) {
+      const allocUnits = ram.alloc_units || 4096;
+      const totalBytes = (ram.size || 0) * allocUnits;
+      const usedBytes = (ram.used || 0) * allocUnits;
+      if (totalBytes > 0) {
+        const usedGB = (usedBytes / (1024**3)).toFixed(2);
+        const totalGB = (totalBytes / (1024**3)).toFixed(2);
+        let pct = ((usedBytes / totalBytes) * 100).toFixed(1);
+        let displayPct = pct;
+        let displayUsed = usedGB;
+        let displayTotal = totalGB;
+        if (usedBytes > totalBytes) {
+          displayPct = '--';
+          displayUsed = totalGB;
+          displayTotal = usedGB;
+        }
+        memEl.textContent = `${displayUsed} / ${displayTotal} GB (${displayPct}%)`;
+        if (memBar) memBar.style.width = `${Math.min(parseFloat(pct) || 0, 100)}%`;
+      } else {
+        memEl.textContent = '--';
+        if (memBar) memBar.style.width = '0%';
+      }
+    } else {
+      memEl.textContent = '--';
+      if (memBar) memBar.style.width = '0%';
+    }
+  } else {
+    memEl.textContent = '--';
+    if (memBar) memBar.style.width = '0%';
+  }
+
+  // Current Health - Storage
+  const storEl = document.getElementById('detail-health-storage');
+  const storBar = document.getElementById('detail-health-storage-bar');
+  if (sys.storage_entries && sys.storage_entries.length > 0) {
+    const ram = findRamEntry(sys.storage_entries);
+    const storageEntries = sys.storage_entries.filter(e => e !== ram);
+    if (storageEntries.length > 0) {
+      const storage = storageEntries[0];
+      const allocUnits = storage.alloc_units || 4096;
+      const totalBytes = (storage.size || 0) * allocUnits;
+      const usedBytes = (storage.used || 0) * allocUnits;
+      if (totalBytes > 0) {
+        const usedGB = (usedBytes / (1024**3)).toFixed(2);
+        const totalGB = (totalBytes / (1024**3)).toFixed(2);
+        let pct = ((usedBytes / totalBytes) * 100).toFixed(1);
+        let displayPct = pct;
+        let displayUsed = usedGB;
+        let displayTotal = totalGB;
+        if (usedBytes > totalBytes) {
+          displayPct = '--';
+          displayUsed = totalGB;
+          displayTotal = usedGB;
+        }
+        storEl.textContent = `${displayUsed} / ${displayTotal} GB (${displayPct}%)`;
+        if (storBar) storBar.style.width = `${Math.min(parseFloat(pct) || 0, 100)}%`;
+      } else {
+        storEl.textContent = '--';
+        if (storBar) storBar.style.width = '0%';
+      }
+    } else {
+      storEl.textContent = 'N/A';
+      if (storBar) storBar.style.width = '0%';
+    }
+  } else {
+    storEl.textContent = '--';
+    if (storBar) storBar.style.width = '0%';
+  }
 
   // Updated timestamp
   const updatedAt = document.getElementById('detail-updated-at');
   if (updatedAt) {
     updatedAt.textContent = 'Updated ' + new Date().toLocaleTimeString('id-ID', { hour12: false });
   }
-
-  // Key metrics row
-  const sys = data.system || {};
-  const latencySummary = data.latency_summary || {};
-  const lossSummary = data.loss_summary || {};
-
-  const keyLatency = document.getElementById('detail-key-latency');
-  if (keyLatency) {
-    keyLatency.textContent = latencySummary.avg ? `${latencySummary.avg} ms` : '--';
+  const qualityUpdated = document.getElementById('detail-quality-updated');
+  if (qualityUpdated) {
+    qualityUpdated.textContent = data.generated_at ? `Updated ${formatTimeAgo(new Date(data.generated_at))}` : '--';
   }
 
-  const keyLoss = document.getElementById('detail-key-loss');
-  if (keyLoss) {
-    keyLoss.textContent = lossSummary.avg ? `${lossSummary.avg}%` : '--';
-    keyLoss.style.color = (lossSummary.avg > 0) ? 'var(--color-warning)' : 'inherit';
-  }
+  // RTT and Loss max values
+  document.getElementById('detail-rtt-avg').textContent = latencySummary.avg || '--';
+  document.getElementById('detail-loss-max').textContent = lossSummary.max || '--';
 
-  const keyCpu = document.getElementById('detail-key-cpu');
-  if (keyCpu) {
-    if (sys.cpu_load_pct !== null && sys.cpu_load_pct !== undefined) {
-      keyCpu.textContent = `${parseFloat(sys.cpu_load_pct).toFixed(1)}%`;
-    } else {
-      keyCpu.textContent = 'N/A';
-      keyCpu.style.color = 'var(--text-muted)';
-    }
-  }
-
-  const keyUptime = document.getElementById('detail-key-uptime');
-  if (keyUptime) {
-    keyUptime.textContent = sys.sys_uptime_human || '--';
-  }
-
-  const keyMemory = document.getElementById('detail-key-memory');
-  if (keyMemory && sys.storage_entries && sys.storage_entries.length > 0) {
-    const ram = findRamEntry(sys.storage_entries);
-    if (ram) {
-      const allocUnits = ram.alloc_units || 4096;
-      const usedBytes = (ram.used || 0) * allocUnits;
-      const totalBytes = (ram.size || 0) * allocUnits;
-      if (totalBytes > 0) {
-        const pct = ((usedBytes / totalBytes) * 100).toFixed(0);
-        keyMemory.textContent = `${pct}%`;
-      } else {
-        keyMemory.textContent = '--';
-      }
-    } else {
-      keyMemory.textContent = '--';
-    }
-  } else if (keyMemory) {
-    keyMemory.textContent = '--';
-  }
-
-  const keySnmp = document.getElementById('detail-key-snmp');
-  if (keySnmp) {
-    keySnmp.textContent = data.data_source === 'realtime-snmp' ? 'Direct' : (sys.has_data ? 'InfluxDB' : 'No data');
-    keySnmp.style.color = sys.has_data ? 'var(--color-online)' : 'var(--text-muted)';
-  }
-
-  // Device Info section
-  const lastSeenEl = document.getElementById('detail-last-seen');
-  if (lastSeenEl) {
-    if (data.device.last_seen) {
-      const seenDate = new Date(data.device.last_seen);
-      lastSeenEl.textContent = formatTimeAgo(seenDate);
-      lastSeenEl.title = seenDate.toLocaleString('id-ID', { hour12: false });
-    } else {
-      lastSeenEl.textContent = '--';
-      lastSeenEl.title = '';
-    }
-  }
-  document.getElementById('detail-poll-interval').textContent = `${data.device.polling_interval || 1}s`;
-  document.getElementById('detail-snmp-comm').textContent = data.device.snmp_community || 'public';
-  document.getElementById('detail-snmp-port').textContent = `${data.device.snmp_port || 161}/udp`;
-
+  // Interface count
   const ifaceCount = (data.interfaces || []).length;
   document.getElementById('detail-iface-count').textContent = `${ifaceCount} interface${ifaceCount !== 1 ? 's' : ''}`;
-  document.getElementById('detail-iface-count-info').textContent = `${ifaceCount} detected`;
 
   // Traffic freshness
   const trafficFreshness = document.getElementById('detail-traffic-freshness');
@@ -914,10 +996,6 @@ function renderDeviceDetail(data, isRefresh = false) {
     const genDate = new Date(data.generated_at);
     trafficFreshness.textContent = `Source: ${data.data_source === 'realtime-snmp' ? 'Direct SNMP' : 'InfluxDB'} • Updated ${formatTimeAgo(genDate)}`;
   }
-
-  // RTT and Loss max values
-  document.getElementById('detail-rtt-avg').textContent = latencySummary.avg || '--';
-  document.getElementById('detail-loss-max').textContent = lossSummary.max || '--';
 
   // Interface table
   renderInterfaceTable(data);
@@ -967,29 +1045,33 @@ function findRamEntry(storageEntries) {
 
 async function loadDeviceEvents(deviceId) {
   const container = document.getElementById('detail-events-list');
+  const countEl = document.getElementById('detail-events-count');
   if (!container) return;
 
   try {
-    const params = new URLSearchParams({ deviceId: deviceId, limit: '10' });
+    const params = new URLSearchParams({ deviceId: deviceId, limit: '20' });
     const res = await fetch(`/api/events?${params.toString()}`).then(r => r.json());
     if (!res.success || !res.events || res.events.length === 0) {
-      container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">No recent events</div>';
+      container.innerHTML = '<div class="dic-empty-state">No recent events</div>';
+      if (countEl) countEl.textContent = '0';
       return;
     }
+
+    if (countEl) countEl.textContent = `${res.events.length} event${res.events.length !== 1 ? 's' : ''}`;
 
     container.innerHTML = res.events.map(e => {
       const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--';
       const sevClass = e.severity || 'info';
       return `
-        <div class="deeplink-event-row" data-device-id="${e.device_id}">
-          <span class="deeplink-event-time">${time}</span>
-          <span class="deeplink-event-type ${sevClass}">${e.event_type || 'EVENT'}</span>
-          <span class="deeplink-event-device">${e.device_name || 'Unknown'}</span>
+        <div class="dic-event-row" data-device-id="${e.device_id}">
+          <span class="dic-event-time">${time}</span>
+          <span class="dic-event-type ${sevClass}">${e.event_type || 'EVENT'}</span>
+          <span class="dic-event-message">${e.message || e.event_type || 'Event'}</span>
         </div>
       `;
     }).join('');
 
-    container.querySelectorAll('.deeplink-event-row').forEach(row => {
+    container.querySelectorAll('.dic-event-row').forEach(row => {
       row.addEventListener('click', () => {
         const devId = row.dataset.deviceId;
         const activeForDevice = state.activeIncidents.find(i => i.deviceId == devId);
@@ -999,40 +1081,74 @@ async function loadDeviceEvents(deviceId) {
       });
     });
   } catch (err) {
-    container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">Failed to load events</div>';
+    container.innerHTML = '<div class="dic-empty-state">Failed to load events</div>';
+    if (countEl) countEl.textContent = '0';
   }
 }
 
 async function updateDetailIncidentSection(deviceId) {
-  const section = document.getElementById('detail-incident-section');
-  const summary = document.getElementById('detail-incident-summary');
-  if (!section || !summary) return;
+  const rootCauseCard = document.getElementById('detail-rootcause-card');
+  const rootCauseContent = document.getElementById('detail-rootcause-content');
+  const rootCauseSeverity = document.getElementById('detail-rootcause-severity');
+  const timelineCard = document.getElementById('detail-timeline-card');
+  const timelineList = document.getElementById('detail-timeline-list');
+  const timelineCount = document.getElementById('detail-timeline-count');
+
+  if (!rootCauseCard || !rootCauseContent || !timelineCard || !timelineList) return;
 
   const activeForDevice = state.activeIncidents.find(i => i.deviceId == deviceId);
   if (!activeForDevice) {
-    section.style.display = 'none';
+    rootCauseCard.style.display = 'none';
+    timelineCard.style.display = 'none';
     return;
   }
 
-  section.style.display = 'block';
-  const startTime = activeForDevice.startedAt ? new Date(activeForDevice.startedAt).toLocaleString('id-ID', { hour12: false }) : '--';
-  summary.innerHTML = `
-    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-      <span class="alert-severity-badge ${activeForDevice.currentSeverity}" style="font-size:0.7rem;">${(activeForDevice.currentSeverity || 'unknown').toUpperCase()}</span>
-      <span style="color:var(--text-primary);font-weight:600;">${activeForDevice.rootCause?.message || 'Incident'}</span>
-      <span style="color:var(--text-muted);font-size:0.7rem;">Started ${startTime}</span>
-    </div>
+  rootCauseCard.style.display = 'flex';
+  timelineCard.style.display = 'flex';
+
+  // Root Cause content
+  rootCauseContent.className = `dic-rootcause-content ${activeForDevice.currentSeverity || ''}`;
+  rootCauseContent.innerHTML = `
+    <div class="dic-rootcause-message">${activeForDevice.rootCause?.message || 'Incident'}</div>
+    ${activeForDevice.rootCause?.evidence ? `<div class="dic-rootcause-evidence">${activeForDevice.rootCause.evidence}</div>` : ''}
   `;
+  if (rootCauseSeverity) {
+    rootCauseSeverity.className = `alert-severity-badge ${activeForDevice.currentSeverity}`;
+    rootCauseSeverity.textContent = (activeForDevice.currentSeverity || 'unknown').toUpperCase();
+    rootCauseSeverity.style.display = 'inline-block';
+  }
+
+  // Timeline entries
+  const timeline = activeForDevice.timeline || [];
+  if (timelineCount) timelineCount.textContent = `${timeline.length} event${timeline.length !== 1 ? 's' : ''}`;
+  if (timeline.length === 0) {
+    timelineList.innerHTML = '<div class="dic-empty-state">No timeline entries</div>';
+  } else {
+    timelineList.innerHTML = timeline.map(entry => {
+      const entryTime = entry.timestamp ? new Date(entry.timestamp).toLocaleString('id-ID', { hour12: false }) : '--';
+      const itemClass = entry.severity === 'critical' ? 'critical' : (entry.severity === 'warning' ? 'warning' : 'ok');
+      return `
+        <div class="dic-timeline-item ${itemClass}">
+          <div>
+            <div class="dic-timeline-status">${entry.status || entry.event || 'Event'}</div>
+            <div class="dic-timeline-time">${entryTime}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
 }
 
 async function loadDeviceHistory(deviceId) {
   const container = document.getElementById('detail-history-list');
+  const countEl = document.getElementById('detail-history-count');
   if (!container) return;
 
   try {
     const res = await fetch(`/api/incidents`).then(r => r.json());
     if (!res.success) {
-      container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">Failed to load history</div>';
+      container.innerHTML = '<div class="dic-empty-state">Failed to load history</div>';
+      if (countEl) countEl.textContent = '0';
       return;
     }
 
@@ -1041,34 +1157,36 @@ async function loadDeviceHistory(deviceId) {
 
     const allHistory = [...activeForDevice ? [activeForDevice] : [], ...deviceHistory].slice(0, 10);
 
+    if (countEl) countEl.textContent = `${allHistory.length} incident${allHistory.length !== 1 ? 's' : ''}`;
+
     if (allHistory.length === 0) {
-      container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">No incident history</div>';
+      container.innerHTML = '<div class="dic-empty-state">No incident history</div>';
       return;
     }
 
     container.innerHTML = allHistory.map(inc => {
-      const startTime = inc.startedAt ? new Date(inc.startedAt).toLocaleString('id-ID', { hour12: false }) : '--';
       const duration = inc.durationMs ? formatDuration(inc.durationMs) : (inc.status === 'active' ? 'Active' : '--');
       const sevClass = inc.currentSeverity || 'info';
       const statusClass = inc.status === 'resolved' ? 'resolved' : 'active';
       return `
-        <div class="deeplink-event-row" data-incident-id="${inc.incidentId}">
-          <span class="alert-severity-badge ${sevClass}" style="font-size:0.6rem;">${(inc.currentSeverity || 'info').toUpperCase()}</span>
-          <span class="deeplink-event-device" style="flex:1;">${inc.rootCause?.message || 'Incident'}</span>
-          <span style="font-size:0.65rem;color:var(--text-muted);">${startTime}</span>
-          <span class="alert-status-pill ${statusClass}" style="font-size:0.6rem;">${inc.status || 'active'}</span>
+        <div class="dic-history-item" data-incident-id="${inc.incidentId}">
+          <span class="dic-history-severity alert-severity-badge ${sevClass}">${(inc.currentSeverity || 'info').toUpperCase()}</span>
+          <span class="dic-history-message">${inc.rootCause?.message || 'Incident'}</span>
+          <span class="dic-history-duration">${duration}</span>
+          <span class="dic-history-status ${statusClass}">${inc.status || 'active'}</span>
         </div>
       `;
     }).join('');
 
-    container.querySelectorAll('.deeplink-event-row[data-incident-id]').forEach(row => {
+    container.querySelectorAll('.dic-history-item[data-incident-id]').forEach(row => {
       row.addEventListener('click', () => {
         const id = row.dataset.incidentId;
         if (id) openIncidentDrawerById(id);
       });
     });
   } catch (err) {
-    container.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);">Failed to load history</div>';
+    container.innerHTML = '<div class="dic-empty-state">Failed to load history</div>';
+    if (countEl) countEl.textContent = '0';
   }
 }
 
@@ -1919,15 +2037,6 @@ function setupEventListeners() {
   // Device Deep-Dive panel close handlers
   document.getElementById('btn-device-detail-close')?.addEventListener('click', closeDeviceDetail);
   document.getElementById('btn-device-detail-x')?.addEventListener('click', closeDeviceDetail);
-  document.getElementById('device-detail-backdrop')?.addEventListener('click', (e) => {
-    if (e.target.id === 'device-detail-backdrop') closeDeviceDetail();
-  });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      const backdrop = document.getElementById('device-detail-backdrop');
-      if (backdrop && backdrop.classList.contains('active')) closeDeviceDetail();
-    }
-  });
 
   // Detail interface selector → refresh throughput chart for that interface
   document.getElementById('detail-interface-select')?.addEventListener('change', () => {
