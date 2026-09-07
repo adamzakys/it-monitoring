@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS incidents (
     ended_at TIMESTAMP WITH TIME ZONE,
     duration_ms BIGINT,
     root_cause JSONB,
-    evidence JSONB
+    evidence JSONB,
+    status_history JSONB DEFAULT '[]'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_incidents_device_id ON incidents(device_id);

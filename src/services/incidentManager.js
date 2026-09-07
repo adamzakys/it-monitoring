@@ -22,7 +22,39 @@ function generateIncidentId(deviceId) {
   return `inc-${deviceId}-${timestamp}-${randomPart}`;
 }
 
-function getRootCause(deviceId, eventType, metric) {
+function getStatusHistoryLabel(eventType, metric) {
+  switch (eventType) {
+    case INCIDENT_STATES.WARNING:
+      if (metric && metric.latency > 45) {
+        return `Warning triggered (latency ${metric.latency}ms > 45ms threshold)`;
+      }
+      if (metric && metric.packetLoss > 2) {
+        return `Warning triggered (packet loss ${metric.packetLoss}% > 2% threshold)`;
+      }
+      return 'Warning triggered';
+    case INCIDENT_STATES.OFFLINE:
+      if (metric) {
+        if (metric.packetLoss >= 100) {
+          return `Device unreachable (${metric.packetLoss}% packet loss)`;
+        }
+        if (metric.latency === 0 && metric.packetLoss > 0) {
+          return `Device unreachable (${metric.packetLoss}% loss, latency timeout)`;
+        }
+        if (metric.packetLoss > 0) {
+          return `Device unreachable (${metric.packetLoss}% packet loss)`;
+        }
+      }
+      return 'Device unreachable (offline)';
+    case INCIDENT_STATES.RECOVERED:
+      return 'Device recovered (online)';
+    case INCIDENT_STATES.ONLINE:
+      return 'Device online';
+    default:
+      return `State changed: ${eventType}`;
+  }
+}
+
+function buildRootCause(eventType, metric) {
   if (eventType === INCIDENT_STATES.OFFLINE) {
     if (metric && metric.packetLoss >= 100) {
       return {
@@ -87,25 +119,50 @@ function getRootCause(deviceId, eventType, metric) {
   };
 }
 
-function createEvidence(metric, lastKnownState) {
-  const ev = {
-    lastKnownState: lastKnownState || 'unknown'
-  };
+function createEvidence(metric, existingEvidence = null) {
+  const ev = existingEvidence ? { ...existingEvidence } : {};
   if (metric) {
     if (metric.latency != null) {
-      ev.maxLatency = metric.latency;
+      if (ev.hasOwnProperty('maxLatency')) {
+        ev.maxLatency = Math.max(ev.maxLatency, metric.latency);
+      } else {
+        ev.maxLatency = metric.latency;
+      }
     }
     if (metric.packetLoss != null) {
-      ev.maxPacketLoss = metric.packetLoss;
+      if (ev.hasOwnProperty('maxPacketLoss')) {
+        ev.maxPacketLoss = Math.max(ev.maxPacketLoss, metric.packetLoss);
+      } else {
+        ev.maxPacketLoss = metric.packetLoss;
+      }
     }
     if (metric.inMbps != null) {
-      ev.maxInMbps = metric.inMbps;
+      if (ev.hasOwnProperty('maxInMbps')) {
+        ev.maxInMbps = Math.max(ev.maxInMbps, metric.inMbps);
+      } else {
+        ev.maxInMbps = metric.inMbps;
+      }
     }
     if (metric.outMbps != null) {
-      ev.maxOutMbps = metric.outMbps;
+      if (ev.hasOwnProperty('maxOutMbps')) {
+        ev.maxOutMbps = Math.max(ev.maxOutMbps, metric.outMbps);
+      } else {
+        ev.maxOutMbps = metric.outMbps;
+      }
     }
   }
   return ev;
+}
+
+function addStatusHistoryEntry(incident, newEventType, metric) {
+  if (!incident.statusHistory) {
+    incident.statusHistory = [];
+  }
+  incident.statusHistory.push({
+    status: newEventType,
+    event: getStatusHistoryLabel(newEventType, metric),
+    timestamp: new Date().toISOString()
+  });
 }
 
 async function createIncident(deviceId, deviceName, severity, eventType, metric) {
@@ -115,19 +172,27 @@ async function createIncident(deviceId, deviceName, severity, eventType, metric)
   }
 
   const incidentId = generateIncidentId(deviceId);
-  const rootCause = getRootCause(deviceId, eventType, metric);
+  const rootCause = buildRootCause(eventType, metric);
+  const now = new Date().toISOString();
+
   const incident = {
     incidentId,
     deviceId,
     deviceName,
     currentSeverity: severity,
     status: STATUS.ACTIVE,
-    startedAt: new Date().toISOString(),
+    startedAt: now,
     endedAt: null,
     durationMs: null,
     rootCause,
-    evidence: createEvidence(metric, eventType),
-    eventType
+    evidence: createEvidence(metric),
+    statusHistory: [
+      {
+        status: eventType,
+        event: getStatusHistoryLabel(eventType, metric),
+        timestamp: now
+      }
+    ]
   };
 
   memoryIncidents.set(deviceId, incident);
@@ -135,9 +200,9 @@ async function createIncident(deviceId, deviceName, severity, eventType, metric)
   if (db.isPostgresConnected()) {
     try {
       await db.query(
-        `INSERT INTO incidents (incident_id, device_id, device_name, current_severity, status, started_at, root_cause, evidence)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [incidentId, deviceId, deviceName, severity, STATUS.ACTIVE, incident.startedAt, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence)]
+        `INSERT INTO incidents (incident_id, device_id, device_name, current_severity, status, started_at, root_cause, evidence, status_history)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [incidentId, deviceId, deviceName, severity, STATUS.ACTIVE, incident.startedAt, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory)]
       );
     } catch (err) {
       console.error('[IncidentManager] Failed to create incident:', err.message);
@@ -158,32 +223,15 @@ async function updateIncidentSeverity(deviceId, newSeverity, eventType, metric) 
   }
 
   incident.currentSeverity = newSeverity;
-  incident.rootCause = getRootCause(deviceId, eventType, metric);
-
-  if (metric) {
-    if (metric.latency != null) {
-      if (incident.evidence.hasOwnProperty('maxLatency')) {
-        incident.evidence.maxLatency = Math.max(incident.evidence.maxLatency, metric.latency);
-      } else {
-        incident.evidence.maxLatency = metric.latency;
-      }
-    }
-    if (metric.packetLoss != null) {
-      if (incident.evidence.hasOwnProperty('maxPacketLoss')) {
-        incident.evidence.maxPacketLoss = Math.max(incident.evidence.maxPacketLoss, metric.packetLoss);
-      } else {
-        incident.evidence.maxPacketLoss = metric.packetLoss;
-      }
-    }
-  }
-
-  incident.evidence.lastKnownState = eventType;
+  incident.rootCause = buildRootCause(eventType, metric);
+  incident.evidence = createEvidence(metric, incident.evidence);
+  addStatusHistoryEntry(incident, eventType, metric);
 
   if (db.isPostgresConnected()) {
     try {
       await db.query(
-        `UPDATE incidents SET current_severity = $1, root_cause = $2, evidence = $3 WHERE incident_id = $4 AND status = $5`,
-        [newSeverity, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), incident.incidentId, STATUS.ACTIVE]
+        `UPDATE incidents SET current_severity = $1, root_cause = $2, evidence = $3, status_history = $4 WHERE incident_id = $5 AND status = $6`,
+        [newSeverity, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory), incident.incidentId, STATUS.ACTIVE]
       );
     } catch (err) {
       console.error('[IncidentManager] Failed to update incident:', err.message);
@@ -202,15 +250,16 @@ async function closeIncident(deviceId, eventType, metric) {
   incident.status = STATUS.RESOLVED;
   incident.endedAt = new Date().toISOString();
   incident.durationMs = new Date(incident.endedAt).getTime() - new Date(incident.startedAt).getTime();
-  incident.rootCause = getRootCause(deviceId, eventType, metric);
+  incident.evidence = createEvidence(metric, incident.evidence);
+  addStatusHistoryEntry(incident, eventType, metric);
 
   memoryIncidents.delete(deviceId);
 
   if (db.isPostgresConnected()) {
     try {
       await db.query(
-        `UPDATE incidents SET status = $1, ended_at = $2, duration_ms = $3, root_cause = $4 WHERE incident_id = $5`,
-        [STATUS.RESOLVED, incident.endedAt, incident.durationMs, JSON.stringify(incident.rootCause), incident.incidentId]
+        `UPDATE incidents SET status = $1, ended_at = $2, duration_ms = $3, root_cause = $4, evidence = $5, status_history = $6 WHERE incident_id = $7`,
+        [STATUS.RESOLVED, incident.endedAt, incident.durationMs, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory), incident.incidentId]
       );
     } catch (err) {
       console.error('[IncidentManager] Failed to close incident:', err.message);
@@ -236,18 +285,7 @@ async function getActiveIncidentForDevice(deviceId) {
       );
       if (res.rows.length > 0) {
         const row = res.rows[0];
-        const incident = {
-          incidentId: row.incident_id,
-          deviceId: row.device_id,
-          deviceName: row.device_name,
-          currentSeverity: row.current_severity,
-          status: row.status,
-          startedAt: row.started_at,
-          endedAt: row.ended_at,
-          durationMs: row.duration_ms,
-          rootCause: typeof row.root_cause === 'string' ? JSON.parse(row.root_cause) : row.root_cause,
-          evidence: typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence
-        };
+        const incident = parseIncidentRow(row);
         memoryIncidents.set(deviceId, incident);
         return incident;
       }
@@ -257,6 +295,22 @@ async function getActiveIncidentForDevice(deviceId) {
   }
 
   return null;
+}
+
+function parseIncidentRow(row) {
+  return {
+    incidentId: row.incident_id,
+    deviceId: row.device_id,
+    deviceName: row.device_name,
+    currentSeverity: row.current_severity,
+    status: row.status,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    durationMs: row.duration_ms,
+    rootCause: typeof row.root_cause === 'string' ? JSON.parse(row.root_cause) : row.root_cause,
+    evidence: typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence,
+    statusHistory: typeof row.status_history === 'string' ? JSON.parse(row.status_history) : (row.status_history || [])
+  };
 }
 
 async function getAllActiveIncidents() {
@@ -275,18 +329,7 @@ async function getAllActiveIncidents() {
       );
       for (const row of res.rows) {
         if (!active.find(i => i.incidentId === row.incident_id)) {
-          active.push({
-            incidentId: row.incident_id,
-            deviceId: row.device_id,
-            deviceName: row.device_name,
-            currentSeverity: row.current_severity,
-            status: row.status,
-            startedAt: row.started_at,
-            endedAt: row.ended_at,
-            durationMs: row.duration_ms,
-            rootCause: typeof row.root_cause === 'string' ? JSON.parse(row.root_cause) : row.root_cause,
-            evidence: typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence
-          });
+          active.push(parseIncidentRow(row));
         }
       }
     } catch (err) {
@@ -304,18 +347,7 @@ async function getIncidentHistory(limit = 100) {
         `SELECT * FROM incidents ORDER BY started_at DESC LIMIT $1`,
         [limit]
       );
-      return res.rows.map(row => ({
-        incidentId: row.incident_id,
-        deviceId: row.device_id,
-        deviceName: row.device_name,
-        currentSeverity: row.current_severity,
-        status: row.status,
-        startedAt: row.started_at,
-        endedAt: row.ended_at,
-        durationMs: row.duration_ms,
-        rootCause: typeof row.root_cause === 'string' ? JSON.parse(row.root_cause) : row.root_cause,
-        evidence: typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence
-      }));
+      return res.rows.map(parseIncidentRow);
     } catch (err) {
       console.error('[IncidentManager] Failed to get incident history:', err.message);
     }

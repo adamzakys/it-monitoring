@@ -11,7 +11,8 @@ const state = {
   activeFilter: 'all',
   searchQuery: '',
   alerts: [],
-  incidents: [],
+  activeIncidents: [],
+  incidentHistory: [],
   ws: null,
   charts: {
     traffic: null,
@@ -71,7 +72,8 @@ async function loadInitialData() {
       state.alerts = alertRes.alerts;
     }
     if (incidentRes.success) {
-      state.incidents = [...(incidentRes.active || []), ...(incidentRes.history || [])];
+      state.activeIncidents = incidentRes.active || [];
+      state.incidentHistory = incidentRes.history || [];
       renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
     } else {
       renderAlertFeed();
@@ -1215,7 +1217,7 @@ function renderIncidentFeed(searchQuery = '', sevFilter = 'all') {
   container.innerHTML = '';
 
   const q = searchQuery.toLowerCase();
-  const filtered = state.incidents.filter(inc => {
+  const filtered = state.activeIncidents.filter(inc => {
     const matchSev = sevFilter === 'all' || inc.currentSeverity === sevFilter;
     const matchSearch = !q || (inc.deviceName || '').toLowerCase().includes(q) ||
                         (inc.incidentId || '').toLowerCase().includes(q);
@@ -1257,7 +1259,7 @@ function renderIncidentFeed(searchQuery = '', sevFilter = 'all') {
     container.appendChild(item);
   });
 
-  const activeCount = state.incidents.filter(i => i.status === 'active').length;
+  const activeCount = state.activeIncidents.length;
   const panelCountEl = document.getElementById('panel-incidents-count');
   const navBadgeEl = document.getElementById('nav-alert-counter');
   if (panelCountEl) panelCountEl.textContent = activeCount;
@@ -1379,9 +1381,30 @@ function renderIncidentDrawerContent(data) {
   const evOutEl = document.getElementById('inc-ev-out-mbps');
   if (evOutEl) evOutEl.textContent = data.evidence?.maxOutMbps != null ? `${data.evidence.maxOutMbps.toFixed(2)} Mbps` : '--';
 
-  const timelineStartEl = document.getElementById('inc-timeline-start');
-  if (timelineStartEl && startedAt) {
-    timelineStartEl.textContent = new Date(startedAt).toLocaleTimeString('id-ID', { hour12: false });
+  const timelineContainer = document.getElementById('incident-timeline');
+  if (timelineContainer) {
+    const history = data.statusHistory || [];
+    const sevClass = { warning: 'warning', critical: 'critical', offline: 'critical', online: 'online', recovered: 'online' };
+
+    if (history.length === 0) {
+      timelineContainer.innerHTML = `
+        <div class="incident-timeline-item">
+          <span class="incident-timeline-dot warning"></span>
+          <span class="incident-timeline-text">Incident created</span>
+          <span class="incident-timeline-time">${startedAt ? new Date(startedAt).toLocaleTimeString('id-ID', { hour12: false }) : '--'}</span>
+        </div>`;
+    } else {
+      timelineContainer.innerHTML = history.map((entry, i) => {
+        const dotClass = sevClass[entry.status?.toLowerCase()] || 'warning';
+        const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--';
+        return `
+          <div class="incident-timeline-item">
+            <span class="incident-timeline-dot ${dotClass}"></span>
+            <span class="incident-timeline-text">${entry.event || entry.status || 'State changed'}</span>
+            <span class="incident-timeline-time">${timeStr}</span>
+          </div>`;
+      }).join('');
+    }
   }
 }
 
@@ -1841,10 +1864,11 @@ function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
   const tbody = document.getElementById('alerts-page-tbody');
   if (!tbody) return;
 
+  const allIncidents = [...state.activeIncidents, ...state.incidentHistory];
   const q = searchQuery.toLowerCase();
-  const filtered = state.alerts.filter(a => {
-    const matchSev = sevFilter === 'all' || a.severity === sevFilter;
-    const matchSearch = !q || (a.title + ' ' + (a.target || '') + ' ' + (a.device_name || '')).toLowerCase().includes(q);
+  const filtered = allIncidents.filter(a => {
+    const matchSev = sevFilter === 'all' || a.currentSeverity === sevFilter;
+    const matchSearch = !q || ((a.deviceName || '') + ' ' + (a.incidentId || '') + ' ' + (a.rootCause?.message || '')).toLowerCase().includes(q);
     return matchSev && matchSearch;
   });
 
@@ -1854,39 +1878,50 @@ function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
   }
 
   tbody.innerHTML = filtered.map(a => {
-    const sevClass = a.severity || 'info';
-    const startTime = new Date(a.created_at);
-    const duration = getDuration(startTime);
+    const sevClass = a.currentSeverity || 'info';
+    const startTime = new Date(a.startedAt);
+    const duration = a.durationMs
+      ? formatDuration(a.durationMs)
+      : getDuration(startTime);
     const status = a.status || 'active';
-    const statusClass = status === 'acknowledged' ? 'acknowledged' : (status === 'resolved' ? 'resolved' : 'active');
-    const isAcked = status === 'acknowledged';
+    const statusClass = status === 'resolved' ? 'resolved' : 'active';
 
     return `
       <tr>
         <td>
           <span class="alert-severity-badge ${sevClass}">
             <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;"></span>
-            ${(a.severity || 'info').toUpperCase()}
+            ${(a.currentSeverity || 'info').toUpperCase()}
           </span>
         </td>
         <td class="alert-title-cell">
-          ${a.title || 'Unknown incident'}
-          <span>${a.message || a.type || ''}</span>
+          ${a.rootCause?.message || 'Incident'}
+          <span>${a.deviceName || ''}</span>
         </td>
-        <td class="alert-device-cell">${a.target || '--'}</td>
+        <td class="alert-device-cell">${a.deviceName || '--'}</td>
         <td class="alert-time-cell">${startTime.toLocaleString('id-ID', { hour12: false })}</td>
         <td class="alert-duration-cell">${duration}</td>
         <td class="alert-status-cell">
           <span class="alert-status-pill ${statusClass}">${status}</span>
         </td>
         <td class="alert-actions-cell">
-          <button class="btn-ack ${isAcked ? 'acknowledged' : ''}" ${isAcked ? 'disabled' : ''} onclick="acknowledgeAlert(${a.id})">
-            ${isAcked ? 'ACKd' : 'ACK'}
+          <button class="btn-ack" disabled>
+            --
           </button>
         </td>
       </tr>
     `;
   }).join('');
+}
+
+function formatDuration(ms) {
+  if (!ms || ms <= 0) return '--';
+  const secs = Math.floor(ms / 1000);
+  const mins = Math.floor(secs / 60);
+  const hrs = Math.floor(mins / 60);
+  if (hrs > 0) return `${hrs}h ${mins % 60}m`;
+  if (mins > 0) return `${mins}m ${secs % 60}s`;
+  return `${secs}s`;
 }
 
 function getDuration(startTime) {
