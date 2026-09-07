@@ -1,6 +1,8 @@
 const { WebSocketServer } = require('ws');
 const db = require('../db');
 const influxService = require('./influxService');
+const { emitEvent, EVENT_TYPES } = require('./eventLogger');
+const { INCIDENT_STATES, createIncident, updateIncidentSeverity, closeIncident, getActiveIncidentForDevice } = require('./incidentManager');
 
 let wss = null;
 let intervalId = null;
@@ -516,6 +518,13 @@ async function evaluateDeviceHealth(device, metric) {
 
     if (track.failCount >= 2 && track.currentStatus !== 'offline') {
       track.currentStatus = 'offline';
+      await emitEvent(device.id, device.name, EVENT_TYPES.OFFLINE, metric.packetLoss);
+      const existingIncident = await getActiveIncidentForDevice(device.id);
+      if (existingIncident) {
+        await updateIncidentSeverity(device.id, 'critical', INCIDENT_STATES.OFFLINE, metric);
+      } else {
+        await createIncident(device.id, device.name, 'critical', INCIDENT_STATES.OFFLINE, metric);
+      }
       await triggerAlert({
         deviceId: device.id,
         type: 'connection_lost',
@@ -532,6 +541,9 @@ async function evaluateDeviceHealth(device, metric) {
 
     if (track.warnCount >= 2 && track.currentStatus !== 'warning') {
       track.currentStatus = 'warning';
+      const eventType = metric.latency > 45 ? EVENT_TYPES.LATENCY_HIGH : EVENT_TYPES.PACKET_LOSS_HIGH;
+      await emitEvent(device.id, device.name, eventType, metric.latency || metric.packetLoss);
+      await createIncident(device.id, device.name, 'warning', INCIDENT_STATES.WARNING, metric);
       await triggerAlert({
         deviceId: device.id,
         type: 'degraded',
@@ -549,6 +561,8 @@ async function evaluateDeviceHealth(device, metric) {
     if (track.okCount >= 2 && (track.currentStatus === 'offline' || track.currentStatus === 'warning')) {
       const prevStatus = track.currentStatus;
       track.currentStatus = 'online';
+      await emitEvent(device.id, device.name, EVENT_TYPES.ONLINE, metric.latency);
+      await closeIncident(device.id, INCIDENT_STATES.RECOVERED, metric);
       await triggerAlert({
         deviceId: device.id,
         type: 'recovered',

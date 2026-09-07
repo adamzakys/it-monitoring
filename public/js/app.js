@@ -11,6 +11,7 @@ const state = {
   activeFilter: 'all',
   searchQuery: '',
   alerts: [],
+  incidents: [],
   ws: null,
   charts: {
     traffic: null,
@@ -51,11 +52,12 @@ async function initApp() {
  */
 async function loadInitialData() {
   try {
-    const [kpiRes, devRes, alertRes, feedRes] = await Promise.all([
+    const [kpiRes, devRes, alertRes, feedRes, incidentRes] = await Promise.all([
       fetch('/api/kpi').then(r => r.json()),
       fetch('/api/devices').then(r => r.json()),
       fetch('/api/alerts').then(r => r.json()),
-      fetch('/api/live-feed').then(r => r.json())
+      fetch('/api/live-feed').then(r => r.json()),
+      fetch('/api/incidents').then(r => r.json()).catch(() => ({ success: false, active: [], history: [] }))
     ]);
 
     if (kpiRes.success) updateKpis(kpiRes);
@@ -67,6 +69,11 @@ async function loadInitialData() {
     }
     if (alertRes.success) {
       state.alerts = alertRes.alerts;
+    }
+    if (incidentRes.success) {
+      state.incidents = [...(incidentRes.active || []), ...(incidentRes.history || [])];
+      renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
+    } else {
       renderAlertFeed();
     }
     if (feedRes.success) {
@@ -391,7 +398,7 @@ function handleWsMessage(msg) {
       server_time: msg.fullTime
     });
     if (state.activePanelTab === 'quickstats') updateQuickStats();
-    if (state.activePanelTab === 'incidents') renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
+    if (state.activePanelTab === 'incidents') renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
   }
 }
 
@@ -1164,6 +1171,7 @@ function renderAlertFeed(searchQuery = '', sevFilter = 'all') {
   filtered.slice(0, 20).forEach(alert => {
     const item = document.createElement('div');
     item.className = 'stream-item';
+    item.style.cursor = 'pointer';
 
     const iconType = alert.severity === 'critical' ? 'critical' : (alert.severity === 'info' ? 'info' : 'warning');
     const timeAgo = formatTimeAgo(new Date(alert.created_at));
@@ -1178,6 +1186,10 @@ function renderAlertFeed(searchQuery = '', sevFilter = 'all') {
         <div class="stream-time-tag">${timeAgo}</div>
       </div>
     `;
+
+    item.addEventListener('click', () => {
+      openIncidentDrawer(alert);
+    });
 
     container.appendChild(item);
   });
@@ -1195,6 +1207,182 @@ function updateAlertCounter() {
   if (streamBadgeEl) streamBadgeEl.textContent = count;
   if (navBadgeEl) navBadgeEl.textContent = count;
   if (floatCountEl) floatCountEl.textContent = count;
+}
+
+function renderIncidentFeed(searchQuery = '', sevFilter = 'all') {
+  const container = document.getElementById('stream-log-container');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const q = searchQuery.toLowerCase();
+  const filtered = state.incidents.filter(inc => {
+    const matchSev = sevFilter === 'all' || inc.currentSeverity === sevFilter;
+    const matchSearch = !q || (inc.deviceName || '').toLowerCase().includes(q) ||
+                        (inc.incidentId || '').toLowerCase().includes(q);
+    return matchSev && matchSearch;
+  });
+
+  if (filtered.length === 0) {
+    container.innerHTML = '<div style="text-align:center; padding:24px 12px; color:var(--text-muted); font-size:0.78rem;">No incidents match your filter</div>';
+    return;
+  }
+
+  filtered.slice(0, 20).forEach(incident => {
+    const item = document.createElement('div');
+    item.className = 'stream-item';
+    item.style.cursor = 'pointer';
+
+    const iconType = incident.currentSeverity === 'critical' ? 'critical' :
+                     incident.currentSeverity === 'warning' ? 'warning' : 'info';
+    const timeAgo = incident.startedAt ? formatTimeAgo(new Date(incident.startedAt)) : 'Unknown';
+
+    const title = incident.rootCause?.message || `Incident ${incident.incidentId}`;
+    const deviceName = incident.deviceName || 'Unknown Device';
+
+    item.innerHTML = `
+      <div class="stream-icon ${iconType}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>
+      </div>
+      <div class="stream-body">
+        <div class="stream-event-title">${title}</div>
+        <div class="stream-event-target">${deviceName}</div>
+        <div class="stream-time-tag">${timeAgo}</div>
+      </div>
+    `;
+
+    item.addEventListener('click', () => {
+      openIncidentDrawerById(incident.incidentId);
+    });
+
+    container.appendChild(item);
+  });
+
+  const activeCount = state.incidents.filter(i => i.status === 'active').length;
+  const panelCountEl = document.getElementById('panel-incidents-count');
+  const navBadgeEl = document.getElementById('nav-alert-counter');
+  if (panelCountEl) panelCountEl.textContent = activeCount;
+  if (navBadgeEl) navBadgeEl.textContent = activeCount;
+}
+
+/* ============================================================================
+   INCIDENT DRAWER
+   ============================================================================ */
+
+async function openIncidentDrawerById(incidentId) {
+  const backdrop = document.getElementById('incident-drawer-backdrop');
+  if (!backdrop) return;
+  backdrop.classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  try {
+    const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}`).then(r => r.json());
+    if (res.success && res.incident) {
+      renderIncidentDrawerContent(res.incident);
+    } else {
+      renderIncidentDrawerContent({ error: 'Incident not found' });
+    }
+  } catch (e) {
+    renderIncidentDrawerContent({ error: 'Failed to load incident' });
+  }
+}
+
+function openIncidentDrawer(alert) {
+  const backdrop = document.getElementById('incident-drawer-backdrop');
+  if (!backdrop) return;
+  backdrop.classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  renderIncidentDrawerContent(alert);
+}
+
+function closeIncidentDrawer() {
+  const backdrop = document.getElementById('incident-drawer-backdrop');
+  if (!backdrop) return;
+  backdrop.classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function renderIncidentDrawerContent(data) {
+  if (data.error) {
+    const titleText = document.getElementById('incident-drawer-title-text');
+    if (titleText) titleText.textContent = data.error;
+    return;
+  }
+
+  const isIncident = data.incidentId != null;
+  const titleText = document.getElementById('incident-drawer-title-text');
+  const title = isIncident ? (data.rootCause?.message || `Incident ${data.incidentId}`) : (data.title || 'Incident Detail');
+  if (titleText) titleText.textContent = title;
+
+  const sevEl = document.getElementById('inc-severity');
+  if (sevEl) {
+    const sev = isIncident ? (data.currentSeverity || 'unknown') : (data.severity || 'unknown');
+    sevEl.textContent = sev.toUpperCase();
+    sevEl.style.color = sev === 'critical' ? 'var(--color-offline)' :
+                        sev === 'warning' ? 'var(--color-warning)' : 'var(--color-online)';
+  }
+
+  const statusEl = document.getElementById('inc-status');
+  if (statusEl) {
+    statusEl.textContent = (isIncident ? data.status : (data.status || 'active')).toUpperCase();
+  }
+
+  const startedEl = document.getElementById('inc-started');
+  const startedAt = isIncident ? data.startedAt : data.created_at;
+  if (startedEl && startedAt) {
+    startedEl.textContent = new Date(startedAt).toLocaleString('id-ID', { hour12: false });
+  }
+
+  const endedEl = document.getElementById('inc-ended');
+  const endedAt = isIncident ? data.endedAt : data.ended_at;
+  if (endedEl) {
+    endedEl.textContent = endedAt ? new Date(endedAt).toLocaleString('id-ID', { hour12: false }) : '--';
+  }
+
+  const durationEl = document.getElementById('inc-duration');
+  if (durationEl) {
+    if (data.durationMs) {
+      const secs = Math.floor(data.durationMs / 1000);
+      const mins = Math.floor(secs / 60);
+      const hrs = Math.floor(mins / 60);
+      if (hrs > 0) durationEl.textContent = `${hrs}h ${mins % 60}m`;
+      else if (mins > 0) durationEl.textContent = `${mins}m ${secs % 60}s`;
+      else durationEl.textContent = `${secs}s`;
+    } else {
+      durationEl.textContent = '--';
+    }
+  }
+
+  const deviceNameEl = document.getElementById('inc-device-name');
+  if (deviceNameEl) {
+    deviceNameEl.textContent = isIncident ? (data.deviceName || '--') : (data.target || '--');
+  }
+
+  const rcMessageEl = document.getElementById('inc-rc-message');
+  if (rcMessageEl) rcMessageEl.textContent = title;
+
+  const rcThresholdEl = document.getElementById('inc-rc-threshold');
+  if (rcThresholdEl) rcThresholdEl.textContent = data.rootCause?.threshold != null ? String(data.rootCause.threshold) : '--';
+
+  const rcObservedEl = document.getElementById('inc-rc-observed');
+  if (rcObservedEl) rcObservedEl.textContent = data.rootCause?.observed != null ? String(data.rootCause.observed) : '--';
+
+  const evLatencyEl = document.getElementById('inc-ev-latency');
+  if (evLatencyEl) evLatencyEl.textContent = data.evidence?.maxLatency != null ? `${data.evidence.maxLatency} ms` : '--';
+
+  const evLossEl = document.getElementById('inc-ev-packet-loss');
+  if (evLossEl) evLossEl.textContent = data.evidence?.maxPacketLoss != null ? `${data.evidence.maxPacketLoss}%` : '--';
+
+  const evInEl = document.getElementById('inc-ev-in-mbps');
+  if (evInEl) evInEl.textContent = data.evidence?.maxInMbps != null ? `${data.evidence.maxInMbps.toFixed(2)} Mbps` : '--';
+
+  const evOutEl = document.getElementById('inc-ev-out-mbps');
+  if (evOutEl) evOutEl.textContent = data.evidence?.maxOutMbps != null ? `${data.evidence.maxOutMbps.toFixed(2)} Mbps` : '--';
+
+  const timelineStartEl = document.getElementById('inc-timeline-start');
+  if (timelineStartEl && startedAt) {
+    timelineStartEl.textContent = new Date(startedAt).toLocaleTimeString('id-ID', { hour12: false });
+  }
 }
 
 /**
@@ -1393,7 +1581,7 @@ function setupEventListeners() {
   if (incidentSearchInput) {
     incidentSearchInput.addEventListener('input', (e) => {
       state.incidentSearch = e.target.value;
-      renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
+      renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
     });
   }
 
@@ -1403,7 +1591,7 @@ function setupEventListeners() {
       document.querySelectorAll('.sev-filter').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       state.incidentSevFilter = btn.dataset.sev;
-      renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
+      renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
     });
   });
 
@@ -1580,6 +1768,18 @@ function setupEventListeners() {
   // Detail interface selector → refresh throughput chart for that interface
   document.getElementById('detail-interface-select')?.addEventListener('change', () => {
     if (state.detailData) updateDetailCharts(state.detailData);
+  });
+
+  // Incident Drawer close handlers
+  document.getElementById('incident-drawer-close')?.addEventListener('click', closeIncidentDrawer);
+  document.getElementById('incident-drawer-backdrop')?.addEventListener('click', (e) => {
+    if (e.target.id === 'incident-drawer-backdrop') closeIncidentDrawer();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const backdrop = document.getElementById('incident-drawer-backdrop');
+      if (backdrop && backdrop.classList.contains('active')) closeIncidentDrawer();
+    }
   });
 }
 

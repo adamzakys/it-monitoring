@@ -56,6 +56,39 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS events (
+    id SERIAL PRIMARY KEY,
+    device_id INT REFERENCES devices(id) ON DELETE SET NULL,
+    device_name VARCHAR(100),
+    event_type VARCHAR(50) NOT NULL,
+    severity VARCHAR(20) DEFAULT 'info',
+    value FLOAT,
+    source VARCHAR(20) DEFAULT 'polling',
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_device_id ON events(device_id);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    id SERIAL PRIMARY KEY,
+    incident_id VARCHAR(50) NOT NULL UNIQUE,
+    device_id INT REFERENCES devices(id) ON DELETE SET NULL,
+    device_name VARCHAR(100),
+    current_severity VARCHAR(20) DEFAULT 'warning',
+    status VARCHAR(20) DEFAULT 'active',
+    started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    ended_at TIMESTAMP WITH TIME ZONE,
+    duration_ms BIGINT,
+    root_cause JSONB,
+    evidence JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_incidents_device_id ON incidents(device_id);
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+CREATE INDEX IF NOT EXISTS idx_incidents_started_at ON incidents(started_at DESC);
+
 -- =============================================================
 -- Network Topology Tables (LLDP/CDP/MNDP discovery)
 -- =============================================================

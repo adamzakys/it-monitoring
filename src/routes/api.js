@@ -819,6 +819,37 @@ router.post('/devices/test-connection', async (req, res) => {
   });
 });
 
+// 4b. Incidents
+router.get('/incidents', async (req, res) => {
+  try {
+    const incidentManager = require('../services/incidentManager');
+    const active = await incidentManager.getAllActiveIncidents();
+    const history = await incidentManager.getIncidentHistory(50);
+    res.json({ success: true, active, history });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+router.get('/incidents/:id', async (req, res) => {
+  try {
+    const incidentManager = require('../services/incidentManager');
+    const allActive = await incidentManager.getAllActiveIncidents();
+    const incident = allActive.find(i => i.incidentId === req.params.id);
+    if (incident) {
+      return res.json({ success: true, incident });
+    }
+    const history = await incidentManager.getIncidentHistory(100);
+    const historical = history.find(i => i.incidentId === req.params.id);
+    if (historical) {
+      return res.json({ success: true, incident: historical });
+    }
+    res.status(404).json({ success: false, error: 'Incident not found' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
 // 4. Alerts
 router.get('/alerts', async (req, res) => {
   try {
