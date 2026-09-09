@@ -439,33 +439,16 @@
         <button class="deeplink-close-x" id="btn-device-detail-x" title="Close (Esc)">×</button>
       </div>
 
-      <div class="deeplink-body" id="device-detail-body">
-        <!-- MAIN GRID LAYOUT -->
+            <div class="deeplink-body" id="device-detail-body">
+        <!-- MAIN GRID LAYOUT - 12 Column System -->
         <div class="dic-grid">
-          <!-- ROW 1: LIVE TRAFFIC (Hero) + CURRENT HEALTH -->
-          <div class="dic-card dic-traffic">
-            <div class="dic-card-header">
-              <div class="dic-card-title">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-                <h3>Live Traffic</h3>
-              </div>
-              <select id="detail-interface-select" class="select-interface"></select>
-            </div>
-            <div class="dic-chart-container">
-              <canvas id="detailThroughputChart"></canvas>
-            </div>
-            <div class="dic-chart-legend">
-              <span class="legend-item"><span class="legend-dot" style="background:#00f2fe;"></span> Inbound</span>
-              <span class="legend-item"><span class="legend-dot" style="background:#ff9900;"></span> Outbound</span>
-            </div>
-            <div id="detail-traffic-freshness" class="dic-freshness"></div>
-          </div>
 
+          <!-- ROW 1: HEALTH SUMMARY + DEVICE OVERVIEW (side by side) -->
           <div class="dic-card dic-health">
             <div class="dic-card-header">
               <div class="dic-card-title">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-                <h3>Current Health</h3>
+                <h3>Health Summary</h3>
               </div>
             </div>
             <div class="dic-metrics-grid">
@@ -485,65 +468,108 @@
                 <span class="dic-metric-label">Uptime</span>
                 <span class="dic-metric-value" id="detail-health-uptime">--</span>
               </div>
-              <div class="dic-metric dic-metric-wide">
-                <span class="dic-metric-label">CPU Load</span>
-                <div class="dic-progress-wrap">
-                  <span class="dic-progress-value" id="detail-health-cpu">--</span>
-                  <div class="dic-progress-bar"><span id="detail-health-cpu-bar" style="width:0%"></span></div>
-                </div>
+            </div>
+          </div>
+
+          <div class="dic-card dic-overview">
+            <div class="dic-card-header">
+              <div class="dic-card-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line></svg>
+                <h3>Device Overview</h3>
               </div>
-              <div class="dic-metric dic-metric-wide">
-                <span class="dic-metric-label">Memory</span>
-                <div class="dic-progress-wrap">
-                  <span class="dic-progress-value" id="detail-health-memory">--</span>
-                  <div class="dic-progress-bar"><span id="detail-health-memory-bar" style="width:0%"></span></div>
-                </div>
+            </div>
+            <div class="dic-info-grid">
+              <div class="dic-info-row">
+                <span class="dic-info-label">Hostname</span>
+                <span class="dic-info-value" id="detail-overview-name">--</span>
               </div>
-              <div class="dic-metric dic-metric-wide">
-                <span class="dic-metric-label">Storage</span>
-                <div class="dic-progress-wrap">
-                  <span class="dic-progress-value" id="detail-health-storage">--</span>
-                  <div class="dic-progress-bar"><span id="detail-health-storage-bar" style="width:0%"></span></div>
-                </div>
+              <div class="dic-info-row">
+                <span class="dic-info-label">IP Address</span>
+                <span class="dic-info-value" id="detail-overview-ip">--</span>
+              </div>
+              <div class="dic-info-row">
+                <span class="dic-info-label">Device Type</span>
+                <span class="dic-info-value" id="detail-overview-type">--</span>
+              </div>
+              <div class="dic-info-row">
+                <span class="dic-info-label">Vendor</span>
+                <span class="dic-info-value" id="detail-overview-vendor">--</span>
+              </div>
+              <div class="dic-info-row">
+                <span class="dic-info-label">Model</span>
+                <span class="dic-info-value" id="detail-overview-model">--</span>
+              </div>
+              <div class="dic-info-row">
+                <span class="dic-info-label">RouterOS</span>
+                <span class="dic-info-value" id="detail-overview-ros">--</span>
+              </div>
+              <div class="dic-info-row">
+                <span class="dic-info-label">Polling Interval</span>
+                <span class="dic-info-value" id="detail-overview-polling">--</span>
+              </div>
+              <div class="dic-info-row">
+                <span class="dic-info-label">Last Seen</span>
+                <span class="dic-info-value" id="detail-overview-lastseen">--</span>
+              </div>
+              <div class="dic-info-row">
+                <span class="dic-info-label">Interfaces</span>
+                <span class="dic-info-value" id="detail-overview-interfaces">--</span>
               </div>
             </div>
           </div>
 
-          <!-- ROW 2: NETWORK QUALITY (RTT + Loss charts) -->
-          <div class="dic-card dic-network">
+          <!-- ROW 2: LIVE TRAFFIC (Full Width Hero) -->
+          <div class="dic-card dic-traffic">
+            <div class="dic-card-header">
+              <div class="dic-card-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+                <h3>Live Traffic</h3>
+              </div>
+              <select id="detail-interface-select" class="select-interface"></select>
+            </div>
+            <div class="dic-chart-container">
+              <canvas id="detailThroughputChart"></canvas>
+            </div>
+            <div class="dic-chart-legend">
+              <span class="legend-item"><span class="legend-dot" style="background:#10b981;"></span> Inbound</span>
+              <span class="legend-item"><span class="legend-dot" style="background:#00f2fe;"></span> Outbound</span>
+            </div>
+            <div id="detail-traffic-freshness" class="dic-freshness"></div>
+          </div>
+
+          <!-- ROW 3: RTT & LATENCY + PACKET LOSS (side by side) -->
+          <div class="dic-card dic-rtt">
             <div class="dic-card-header">
               <div class="dic-card-title">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                <h3>Network Quality</h3>
+                <h3>RTT & Latency</h3>
               </div>
               <span id="detail-quality-updated" class="dic-freshness-inline">--</span>
             </div>
-            <div class="dic-subgrid">
-              <div class="dic-subcard">
-                <div class="dic-subcard-label">RTT <span class="dic-subcard-value">Avg <strong id="detail-rtt-avg">--</strong> ms</span></div>
-                <div class="dic-chart-container-sm"><canvas id="detailRttChart"></canvas></div>
-              </div>
-              <div class="dic-subcard">
-                <div class="dic-subcard-label">Packet Loss <span class="dic-subcard-value">Max <strong id="detail-loss-max">--</strong>%</span></div>
-                <div class="dic-chart-container-sm"><canvas id="detailLossChart"></canvas></div>
-              </div>
+            <div class="dic-chart-container">
+              <canvas id="detailRttChart"></canvas>
+            </div>
+            <div class="dic-chart-legend">
+              <span class="legend-item"><span class="legend-dot" style="background:#10b981;"></span> Min</span>
+              <span class="legend-item"><span class="legend-dot" style="background:#00f2fe;"></span> Avg</span>
+              <span class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span> Max</span>
             </div>
           </div>
 
-          <!-- ROW 3: TIMELINE + ROOT CAUSE -->
-          <div class="dic-card dic-timeline" id="detail-timeline-card">
+          <div class="dic-card dic-loss">
             <div class="dic-card-header">
               <div class="dic-card-title">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                <h3>Incident Timeline</h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>
+                <h3>Packet Loss</h3>
               </div>
-              <span id="detail-timeline-count" class="dic-count-badge">--</span>
+              <span class="dic-freshness-inline">Max <strong id="detail-loss-max" style="color:var(--text-primary);">--</strong>%</span>
             </div>
-            <div class="dic-timeline-list" id="detail-timeline-list">
-              <div class="dic-empty-state">No active incident</div>
+            <div class="dic-chart-container">
+              <canvas id="detailLossChart"></canvas>
             </div>
           </div>
 
+          <!-- ROW 4: ROOT CAUSE + TIMELINE (side by side) -->
           <div class="dic-card dic-rootcause" id="detail-rootcause-card">
             <div class="dic-card-header">
               <div class="dic-card-title">
@@ -557,56 +583,25 @@
             </div>
           </div>
 
-          <!-- ROW 4: DEVICE OVERVIEW -->
-          <div class="dic-card dic-overview">
+          <div class="dic-card dic-timeline" id="detail-timeline-card">
             <div class="dic-card-header">
               <div class="dic-card-title">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line></svg>
-                <h3>Device Overview</h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                <h3>Incident Timeline</h3>
               </div>
+              <span id="detail-timeline-count" class="dic-count-badge">--</span>
             </div>
-            <div class="dic-info-grid">
-              <div class="dic-info-item">
-                <span class="dic-info-label">Hostname</span>
-                <span class="dic-info-value" id="detail-overview-name">--</span>
-              </div>
-              <div class="dic-info-item">
-                <span class="dic-info-label">IP Address</span>
-                <span class="dic-info-value" id="detail-overview-ip">--</span>
-              </div>
-              <div class="dic-info-item">
-                <span class="dic-info-label">Device Type</span>
-                <span class="dic-info-value" id="detail-overview-type">--</span>
-              </div>
-              <div class="dic-info-item">
-                <span class="dic-info-label">Vendor</span>
-                <span class="dic-info-value" id="detail-overview-vendor">--</span>
-              </div>
-              <div class="dic-info-item">
-                <span class="dic-info-label">Model</span>
-                <span class="dic-info-value" id="detail-overview-model">--</span>
-              </div>
-              <div class="dic-info-item">
-                <span class="dic-info-label">RouterOS</span>
-                <span class="dic-info-value" id="detail-overview-ros">--</span>
-              </div>
-              <div class="dic-info-item">
-                <span class="dic-info-label">Polling</span>
-                <span class="dic-info-value" id="detail-overview-polling">--</span>
-              </div>
-              <div class="dic-info-item">
-                <span class="dic-info-label">Last Seen</span>
-                <span class="dic-info-value" id="detail-overview-lastseen">--</span>
-              </div>
+            <div class="dic-timeline-list" id="detail-timeline-list">
+              <div class="dic-empty-state">No active incident</div>
             </div>
           </div>
 
-          <!-- ROW 5: INTERFACES + RECENT EVENTS -->
+          <!-- ROW 5: INTERFACE SUMMARY (Full Width) -->
           <div class="dic-card dic-interfaces">
             <div class="dic-card-header">
               <div class="dic-card-title">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
-                <h3>Interfaces</h3>
+                <h3>Interface Summary</h3>
               </div>
               <span id="detail-iface-count" class="dic-count-badge">--</span>
             </div>
@@ -629,6 +624,46 @@
             </div>
           </div>
 
+          <!-- ROW 6: SYSTEM RESOURCES + RECENT EVENTS (side by side) -->
+          <div class="dic-card dic-resources">
+            <div class="dic-card-header">
+              <div class="dic-card-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line></svg>
+                <h3>System Resources</h3>
+              </div>
+            </div>
+            <div class="dic-resources-list">
+              <div class="dic-resource-item">
+                <div class="dic-resource-header">
+                  <span class="dic-resource-label">CPU Load</span>
+                  <span class="dic-resource-value" id="detail-sys-cpu">--</span>
+                </div>
+                <div class="dic-resource-bar"><span id="detail-sys-cpu-bar" style="width:0%"></span></div>
+              </div>
+              <div class="dic-resource-item">
+                <div class="dic-resource-header">
+                  <span class="dic-resource-label">Memory</span>
+                  <span class="dic-resource-value" id="detail-sys-memory">--</span>
+                </div>
+                <div class="dic-resource-bar"><span id="detail-sys-memory-bar" style="width:0%"></span></div>
+              </div>
+              <div class="dic-resource-item">
+                <div class="dic-resource-header">
+                  <span class="dic-resource-label">Storage</span>
+                  <span class="dic-resource-value" id="detail-sys-storage">--</span>
+                </div>
+                <div class="dic-resource-bar"><span id="detail-sys-storage-bar" style="width:0%"></span></div>
+              </div>
+              <div class="dic-resource-item">
+                <div class="dic-resource-header">
+                  <span class="dic-resource-label">Temperature</span>
+                  <span class="dic-resource-value" id="detail-sys-temp">--</span>
+                </div>
+                <div class="dic-resource-bar"><span id="detail-sys-temp-bar" style="width:0%"></span></div>
+              </div>
+            </div>
+          </div>
+
           <div class="dic-card dic-events">
             <div class="dic-card-header">
               <div class="dic-card-title">
@@ -642,7 +677,7 @@
             </div>
           </div>
 
-          <!-- ROW 6: INCIDENT HISTORY -->
+          <!-- ROW 7: INCIDENT HISTORY (Full Width) -->
           <div class="dic-card dic-history">
             <div class="dic-card-header">
               <div class="dic-card-title">
@@ -655,6 +690,7 @@
               <div class="dic-empty-state">No incident history</div>
             </div>
           </div>
+
         </div>
       </div>
     </div>

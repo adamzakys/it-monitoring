@@ -1852,14 +1852,14 @@ body {
 .dic-grid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
-  grid-template-rows: auto auto auto auto;
+  grid-template-rows: auto;
   gap: 20px;
   padding: 20px 24px;
-  animation: fadeSlideIn 0.25s ease-out;
+  animation: fadeSlideIn 0.2s ease-out;
 }
 
 @keyframes fadeSlideIn {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
@@ -1871,12 +1871,12 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-  min-height: 180px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .dic-card:hover {
   border-color: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
 }
 
 .dic-card-header {
@@ -1907,61 +1907,88 @@ body {
   margin: 0;
 }
 
-/* Grid positions - 12 column system - 2 rows per logical row for symmetry */
-.dic-traffic {
-  grid-column: 1 / 8;
-  grid-row: 1;
-}
-
+/* Grid positions - 12 column system */
+/* ROW 1: Health Summary + Device Overview (6 cols each) */
 .dic-health {
-  grid-column: 8 / 13;
+  grid-column: 1 / 7;
   grid-row: 1;
 }
 
-.dic-network {
-  grid-column: 1 / 7;
+.dic-overview {
+  grid-column: 7 / 13;
+  grid-row: 1;
+}
+
+/* ROW 2: Live Traffic (full width) */
+.dic-traffic {
+  grid-column: 1 / 13;
   grid-row: 2;
+}
+
+/* ROW 3: RTT + Packet Loss (6 cols each) */
+.dic-rtt {
+  grid-column: 1 / 7;
+  grid-row: 3;
+}
+
+.dic-loss {
+  grid-column: 7 / 13;
+  grid-row: 3;
+}
+
+/* ROW 4: Root Cause + Timeline (6 cols each) */
+.dic-rootcause {
+  grid-column: 1 / 7;
+  grid-row: 4;
 }
 
 .dic-timeline {
   grid-column: 7 / 13;
-  grid-row: 2;
+  grid-row: 4;
 }
 
-.dic-rootcause {
-  grid-column: 1 / 5;
-  grid-row: 3;
-  min-height: 140px;
-}
-
-.dic-overview {
-  grid-column: 5 / 9;
-  grid-row: 3;
-  min-height: 140px;
-}
-
+/* ROW 5: Interface Summary (full width) */
 .dic-interfaces {
-  grid-column: 9 / 13;
-  grid-row: 3;
-  min-height: 140px;
+  grid-column: 1 / 13;
+  grid-row: 5;
+}
+
+/* ROW 6: System Resources + Recent Events (6 cols each) */
+.dic-resources {
+  grid-column: 1 / 7;
+  grid-row: 6;
 }
 
 .dic-events {
-  grid-column: 1 / 7;
-  grid-row: 4;
-  min-height: 160px;
+  grid-column: 7 / 13;
+  grid-row: 6;
 }
 
+/* ROW 7: Incident History (full width) */
 .dic-history {
-  grid-column: 7 / 13;
-  grid-row: 4;
-  min-height: 160px;
+  grid-column: 1 / 13;
+  grid-row: 7;
 }
 
 /* Chart containers */
 .dic-chart-container {
   height: 200px;
   position: relative;
+}
+
+/* Empty / error state overlay shown on top of a chart with no points */
+.dic-chart-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: var(--bg-card);
+  border-radius: 8px;
+  z-index: 2;
+  pointer-events: none;
 }
 
 .dic-chart-container-sm {
@@ -2000,10 +2027,10 @@ body {
   color: var(--text-muted);
 }
 
-/* Health metrics */
+/* Health metrics - 2x3 grid */
 .dic-metrics-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 10px;
 }
 
@@ -2011,14 +2038,14 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
+  padding: 12px 14px;
   background: var(--bg-surface-elevated);
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .dic-metric-wide {
-  grid-column: span 2;
+  grid-column: span 3;
 }
 
 .dic-metric-label {
@@ -2031,7 +2058,7 @@ body {
 
 .dic-metric-value {
   font-family: var(--font-mono);
-  font-size: 1rem;
+  font-size: 1.1rem;
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -2047,7 +2074,7 @@ body {
   font-size: 0.9rem;
   font-weight: 600;
   color: var(--text-primary);
-  min-width: 70px;
+  min-width: 80px;
 }
 
 .dic-progress-bar {
@@ -2066,68 +2093,29 @@ body {
   transition: width 0.4s ease;
 }
 
-/* Network quality subgrid */
-.dic-subgrid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-.dic-subcard {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.dic-subcard-label {
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.dic-subcard-value {
-  font-family: var(--font-mono);
-}
-
-.dic-subcard-value strong {
-  color: var(--text-primary);
-}
-
-/* Count badge */
-.dic-count-badge {
-  font-size: 0.65rem;
-  color: var(--text-muted);
-  background: var(--bg-surface-elevated);
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-weight: 500;
-}
-
-/* Info grid */
+/* Device Overview - definition list style */
 .dic-info-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
+  gap: 2px;
 }
 
-.dic-info-item {
+.dic-info-row {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
-  background: var(--bg-surface-elevated);
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.dic-info-row:last-child {
+  border-bottom: none;
 }
 
 .dic-info-label {
-  font-size: 0.6rem;
+  font-size: 0.7rem;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .dic-info-value {
@@ -2135,6 +2123,54 @@ body {
   font-size: 0.8rem;
   font-weight: 500;
   color: var(--text-primary);
+  text-align: right;
+}
+
+/* System Resources - horizontal progress bars */
+.dic-resources-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dic-resource-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dic-resource-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.dic-resource-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.dic-resource-value {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.dic-resource-bar {
+  height: 8px;
+  background: var(--bg-surface);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.dic-resource-bar span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-brand), #00f2fe);
+  border-radius: 4px;
+  transition: width 0.4s ease;
 }
 
 /* Table */
@@ -2150,7 +2186,7 @@ body {
 
 .dic-table th {
   text-align: left;
-  padding: 8px 10px;
+  padding: 10px 12px;
   color: var(--text-muted);
   font-weight: 600;
   font-size: 0.65rem;
@@ -2160,9 +2196,11 @@ body {
 }
 
 .dic-table td {
-  padding: 8px 10px;
+  padding: 10px 12px;
   color: var(--text-secondary);
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
 }
 
 .dic-table tr:last-child td {
@@ -2175,45 +2213,58 @@ body {
 
 .dic-empty-cell {
   text-align: center;
-  padding: 20px !important;
+  padding: 24px !important;
   color: var(--text-muted);
 }
 
-/* Timeline */
+/* Timeline - vertical timeline visual */
 .dic-timeline-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 180px;
+  gap: 0;
+  max-height: 200px;
   overflow-y: auto;
 }
 
 .dic-timeline-item {
   display: flex;
   gap: 12px;
-  padding: 10px 12px;
-  background: var(--bg-surface-elevated);
-  border-radius: 8px;
-  border-left: 3px solid var(--color-brand);
+  padding: 10px 0;
+  border-left: 2px solid var(--bg-surface-elevated);
+  margin-left: 5px;
+  position: relative;
 }
 
-.dic-timeline-item.critical {
-  border-left-color: var(--color-offline);
+.dic-timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -5px;
+  top: 14px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-brand);
+  border: 2px solid var(--bg-card);
 }
 
-.dic-timeline-item.warning {
-  border-left-color: var(--color-warning);
+.dic-timeline-item.critical::before {
+  background: var(--color-offline);
 }
 
-.dic-timeline-item.ok {
-  border-left-color: var(--color-online);
+.dic-timeline-item.warning::before {
+  background: var(--color-warning);
 }
 
-.dic-timeline-time {
-  font-family: var(--font-mono);
-  font-size: 0.65rem;
-  color: var(--text-muted);
-  margin-bottom: 4px;
+.dic-timeline-item.ok::before {
+  background: var(--color-online);
+}
+
+.dic-timeline-item:first-child {
+  padding-top: 0;
+}
+
+.dic-timeline-content {
+  flex: 1;
 }
 
 .dic-timeline-status {
@@ -2222,14 +2273,21 @@ body {
   color: var(--text-primary);
 }
 
-/* Root cause */
+.dic-timeline-time {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* Root cause - alert panel */
 .dic-rootcause-content {
-  padding: 12px 14px;
+  padding: 14px 16px;
   background: var(--bg-surface-elevated);
   border-radius: 8px;
   font-size: 0.8rem;
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: 1.6;
   border-left: 3px solid var(--color-warning);
 }
 
@@ -2240,12 +2298,23 @@ body {
 .dic-rootcause-message {
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .dic-rootcause-evidence {
   font-size: 0.75rem;
   color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* Count badge */
+.dic-count-badge {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  background: var(--bg-surface-elevated);
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
 }
 
 /* Events list */
@@ -2253,7 +2322,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 180px;
+  max-height: 200px;
   overflow-y: auto;
 }
 
@@ -2303,7 +2372,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 180px;
+  max-height: 200px;
   overflow-y: auto;
 }
 
@@ -2311,7 +2380,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   background: var(--bg-surface-elevated);
   border-radius: 6px;
   cursor: pointer;
@@ -2330,6 +2399,10 @@ body {
   min-width: 60px;
   text-align: center;
 }
+
+.dic-history-severity.critical { background: rgba(239, 68, 68, 0.15); color: var(--color-offline); }
+.dic-history-severity.warning { background: rgba(245, 158, 11, 0.15); color: var(--color-warning); }
+.dic-history-severity.ok { background: rgba(16, 185, 129, 0.15); color: var(--color-online); }
 
 .dic-history-message {
   flex: 1;
@@ -2366,7 +2439,7 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 6px;
   color: var(--text-primary);
-  padding: 4px 8px;
+  padding: 4px 10px;
   font-size: 0.7rem;
   cursor: pointer;
 }
@@ -2378,43 +2451,34 @@ body {
 
 /* Responsive */
 @media (max-width: 1200px) {
-  .dic-traffic { grid-column: 1 / 8; }
-  .dic-health { grid-column: 8 / 13; }
-  .dic-network { grid-column: 1 / 7; }
+  .dic-health { grid-column: 1 / 7; }
+  .dic-overview { grid-column: 7 / 13; }
+  .dic-traffic { grid-column: 1 / 13; }
+  .dic-rtt { grid-column: 1 / 7; }
+  .dic-loss { grid-column: 7 / 13; }
+  .dic-rootcause { grid-column: 1 / 7; }
   .dic-timeline { grid-column: 7 / 13; }
-  .dic-rootcause { grid-column: 1 / 5; }
-  .dic-overview { grid-column: 5 / 9; }
-  .dic-interfaces { grid-column: 9 / 13; }
-  .dic-events { grid-column: 1 / 7; }
-  .dic-history { grid-column: 7 / 13; }
-}
-
-/* Responsive */
-@media (max-width: 1200px) {
-  .dic-traffic { grid-column: 1 / 8; }
-  .dic-health { grid-column: 8 / 13; }
-  .dic-network { grid-column: 1 / 7; }
-  .dic-timeline { grid-column: 7 / 13; }
-  .dic-rootcause { grid-column: 1 / 5; }
-  .dic-overview { grid-column: 5 / 9; }
-  .dic-interfaces { grid-column: 9 / 13; }
-  .dic-events { grid-column: 1 / 7; }
-  .dic-history { grid-column: 7 / 13; }
+  .dic-interfaces { grid-column: 1 / 13; }
+  .dic-resources { grid-column: 1 / 7; }
+  .dic-events { grid-column: 7 / 13; }
+  .dic-history { grid-column: 1 / 13; }
 }
 
 @media (max-width: 1024px) {
   .dic-grid {
     grid-template-columns: repeat(6, 1fr);
   }
-  .dic-traffic { grid-column: 1 / 7; grid-row: 1; }
-  .dic-health { grid-column: 1 / 4; grid-row: 2; }
-  .dic-network { grid-column: 4 / 7; grid-row: 2; }
-  .dic-timeline { grid-column: 1 / 7; grid-row: 3; }
-  .dic-rootcause { grid-column: 1 / 4; grid-row: 4; }
-  .dic-overview { grid-column: 4 / 7; grid-row: 4; }
-  .dic-interfaces { grid-column: 1 / 7; grid-row: 5; }
-  .dic-events { grid-column: 1 / 4; grid-row: 6; }
-  .dic-history { grid-column: 4 / 7; grid-row: 6; }
+  .dic-health { grid-column: 1 / 4; }
+  .dic-overview { grid-column: 4 / 7; }
+  .dic-traffic { grid-column: 1 / 7; }
+  .dic-rtt { grid-column: 1 / 4; }
+  .dic-loss { grid-column: 4 / 7; }
+  .dic-rootcause { grid-column: 1 / 4; }
+  .dic-timeline { grid-column: 4 / 7; }
+  .dic-interfaces { grid-column: 1 / 7; }
+  .dic-resources { grid-column: 1 / 4; }
+  .dic-events { grid-column: 4 / 7; }
+  .dic-history { grid-column: 1 / 7; }
 }
 
 @media (max-width: 768px) {
@@ -2423,31 +2487,33 @@ body {
     gap: 16px;
     padding: 16px;
   }
-  .dic-traffic, .dic-health, .dic-network, .dic-timeline,
-  .dic-rootcause, .dic-overview, .dic-interfaces,
+  .dic-health, .dic-overview, .dic-traffic,
+  .dic-rtt, .dic-loss, .dic-rootcause,
+  .dic-timeline, .dic-interfaces, .dic-resources,
   .dic-events, .dic-history {
     grid-column: 1;
     grid-row: auto;
   }
-  .dic-subgrid {
-    grid-template-columns: 1fr;
-  }
   .dic-metrics-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, 1fr);
   }
   .dic-metric-wide {
-    grid-column: span 1;
+    grid-column: span 2;
   }
   .dic-info-grid {
     grid-template-columns: 1fr;
   }
   .dic-chart-container {
-    height: 150px;
+    height: 180px;
   }
   .dic-card {
     min-height: auto;
   }
 }
+
+/* ==========================================================================
+   DEVICE DEEP-DIVE PANEL (Legacy - being replaced)
+   ========================================================================== */
 
 /* ==========================================================================
    DEVICE DEEP-DIVE PANEL (Legacy - being replaced)

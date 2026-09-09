@@ -383,17 +383,26 @@ async function getPacketLossHistory(deviceId, minutes = 5) {
 }
 
 /**
- * Fetches packet rate (ucast pps) in/out per interface (last 30s derivative)
+ * Fetches the CURRENT traffic rate (Mbps in/out) for every interface of a
+ * device (1-minute derivative of the byte counters, nonNegative).
+ * Returns array of { interface_name, in_mbps, out_mbps }.
+ *
+ * This is the per-interface equivalent of getLiveTelemetry() and feeds the
+ * Interface Summary table (RX Mbps / TX Mbps columns). The previous version
+ * derived unicast packet rates (pps) which no consumer used, while the UI
+ * expected Mbps — so the RX/TX columns were always "--".
  */
-async function getInterfacePacketRate(deviceId, minutes = 1) {
+async function getInterfaceThroughputRates(deviceId, minutes = 5) {
   const { queryApi, bucket } = getClient();
   const devIdStr = String(deviceId);
   const fluxQuery = `
     from(bucket: "${bucket}")
       |> range(start: -${minutes}m)
       |> filter(fn: (r) => r["_measurement"] == "net_interface" and r["device_id"] == "${devIdStr}")
-      |> filter(fn: (r) => r["_field"] == "ifHCInUcastPkts" or r["_field"] == "ifHCOutUcastPkts")
+      |> filter(fn: (r) => r["_field"] == "bytes_in" or r["_field"] == "bytes_out")
       |> derivative(unit: 1s, nonNegative: true)
+      |> map(fn: (r) => ({ r with _value: (r._value * 8.0) / 1000000.0 }))
+      |> map(fn: (r) => ({ r with _value: if r._value > 100000.0 then 0.0 else r._value }))
       |> last()
   `;
 
@@ -405,15 +414,15 @@ async function getInterfacePacketRate(deviceId, minutes = 1) {
           const o = tableMeta.toObject(row);
           const ifname = o.interface_name || 'unknown';
           if (!byIface[ifname]) byIface[ifname] = { interface_name: ifname };
-          if (o._field === 'ifHCInUcastPkts') byIface[ifname].pps_in = parseFloat(o._value) || 0;
-          if (o._field === 'ifHCOutUcastPkts') byIface[ifname].pps_out = parseFloat(o._value) || 0;
+          if (o._field === 'bytes_in') byIface[ifname].in_mbps = parseFloat(parseFloat(o._value).toFixed(3)) || 0;
+          if (o._field === 'bytes_out') byIface[ifname].out_mbps = parseFloat(parseFloat(o._value).toFixed(3)) || 0;
         },
         error: () => resolve(),
         complete: () => resolve()
       });
     });
   } catch (err) {
-    console.error('[InfluxService] getInterfacePacketRate error:', err.message);
+    console.error('[InfluxService] getInterfaceThroughputRates error:', err.message);
   }
   return Object.values(byIface);
 }
@@ -682,7 +691,7 @@ module.exports = {
   getInterfaceDeepMetrics,
   getLatencyHistory,
   getPacketLossHistory,
-  getInterfacePacketRate,
+  getInterfaceThroughputRates,
   getSystemMetrics,
   getInterfaceErrorCounters,
   getInterfaceThroughputHistory

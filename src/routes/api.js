@@ -5,6 +5,7 @@ const telegrafManager = require('../services/telegrafManager');
 const influxService = require('../services/influxService');
 const streamService = require('../services/streamService');
 const topologyDiscovery = require('../services/topologyDiscovery');
+const uptimeService = require('../services/uptimeService');
 
 // ============================================================================
 // Input Validation Utilities (Phase 1 — Security Hardening)
@@ -42,6 +43,20 @@ function isValidCommunity(value) {
 
 function isValidOid(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 128 && RE_SNMP_OID.test(value);
+}
+
+/**
+ * pg DATE → 'YYYY-MM-DD' tanpa pergeseran zona waktu.
+ * (pg mengembalikan DATE sebagai Date tengah malam waktu lokal server;
+ *  serialisasi JSON biasa ke ISO UTC menggeser tanggal -/+ 1 hari.)
+ */
+function pgDateToStr(value) {
+  const dt = value instanceof Date ? value : new Date(value);
+  if (isNaN(dt.getTime())) return String(value);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const d = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 // Attach validators onto the router object so `require('./routes/api')` still
@@ -96,13 +111,20 @@ router.get('/kpi', async (req, res) => {
     const offline = devices.filter(d => d.status === 'offline').length;
     const warning = devices.filter(d => d.status === 'warning').length;
 
-    // Hitung SLA 30 hari RIIL dari tabel daily_uptime (PostgreSQL)
-    // atau fallback dari status device saat ini + in-memory store.
+    // SLA 30 hari RIIL: daily_uptime diisi dari InfluxDB ping oleh
+    // uptimeService (jangan pernah fallback ke deret sintetis).
     let uptime30d = 100;
     let trendline = [];
     let dailyBreakdown = [];
 
     if (db.isPostgresConnected()) {
+      // Seed daily_uptime dari data ping InfluxDB (lazy, cache 5 menit)
+      try {
+        await uptimeService.ensureDailyUptime();
+      } catch (e) {
+        console.warn('[KPI] daily uptime sync failed:', e.message);
+      }
+
       try {
         const upRes = await db.query(
           `SELECT date, uptime_percentage FROM daily_uptime
@@ -111,39 +133,35 @@ router.get('/kpi', async (req, res) => {
         );
         if (upRes.rows.length > 0) {
           dailyBreakdown = upRes.rows.map(r => ({
-            date: r.date,
+            date: pgDateToStr(r.date),
             pct: parseFloat(r.uptime_percentage)
           }));
           trendline = dailyBreakdown.map(d => d.pct);
-          // Weighted average 30-day SLA
+          // Rata-rata SLA dari hari-hari yang benar-benar punya data
           const sum = dailyBreakdown.reduce((acc, d) => acc + d.pct, 0);
           uptime30d = parseFloat((sum / dailyBreakdown.length).toFixed(2));
         } else {
-          // Tabel ada tapi kosong -> hitung real-time dari status devices
+          // Belum ada satu hari pun data riil → pakai status terkini sebagai
+          // indikator, TANPA trendline buatan (sparkline kosong = jujur).
           uptime30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
-          trendline = generateFallbackTrendline(uptime30d);
+          trendline = [];
         }
       } catch (e) {
         uptime30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
-        trendline = generateFallbackTrendline(uptime30d);
+        trendline = [];
       }
     } else {
-      // Memory mode: hitung dari status device aktif
+      // Memory mode: hitung dari status device aktif (tanpa data sintetis)
       uptime30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
-      trendline = generateFallbackTrendline(uptime30d);
+      trendline = [];
     }
-
-    // Pastikan trendline selalu 30 titik agar sparkline konsisten
-    while (trendline.length < 30) {
-      trendline.unshift(uptime30d);
-    }
-    trendline = trendline.slice(-30);
 
     res.json({
       success: true,
       uptime_30d: uptime30d,
       trendline,
       daily_breakdown: dailyBreakdown,
+      sla_data_days: dailyBreakdown.length,
       total_devices: total,
       online_count: online,
       offline_count: offline,
@@ -155,25 +173,6 @@ router.get('/kpi', async (req, res) => {
     res.status(500).json({ success: false, error: safeError(err) });
   }
 });
-
-/**
- * Menghasilkan 30-day trendline sintetis yang konsisten dengan nilai saat ini,
- * digunakan saat data historis daily_uptime belum tersedia.
- */
-function generateFallbackTrendline(currentValue) {
-  const target = Number.isFinite(currentValue) ? currentValue : 99.5;
-  const points = [];
-  for (let i = 0; i < 30; i++) {
-    // Fluktuasi natural ±0.3 di sekitar baseline, dengan tren naik ke nilai sekarang
-    const baseline = target - (30 - i) * 0.01;
-    const noise = (Math.sin(i * 1.3) + Math.cos(i * 0.7)) * 0.15;
-    const val = Math.max(95, Math.min(100, baseline + noise));
-    points.push(parseFloat(val.toFixed(2)));
-  }
-  // Pastikan titik terakhir = currentValue
-  points[points.length - 1] = target;
-  return points;
-}
 
 // 2. Devices CRUD
 router.get('/devices', async (req, res) => {
@@ -474,14 +473,22 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
     if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
 
     // 2. InfluxDB queries in parallel
-    const [interfaces, latencyHist, lossHist, packetRates, systemMetrics, errorCounters] = await Promise.all([
+    const [interfaces, latencyHist, lossHist, throughputRates, systemMetrics, errorCounters] = await Promise.all([
       influxService.getInterfaceDeepMetrics(id).catch(() => []),
       influxService.getLatencyHistory(id, 5).catch(() => []),
       influxService.getPacketLossHistory(id, 5).catch(() => []),
-      influxService.getInterfacePacketRate(id, 1).catch(() => []),
+      influxService.getInterfaceThroughputRates(id, 5).catch(() => []),
       influxService.getSystemMetrics(id).catch(() => ({ has_data: false })),
       influxService.getInterfaceErrorCounters(id).catch(() => [])
     ]);
+
+    // 2b. Some agents write net_interface rows without an interface_name tag;
+    // they collapse into a single "unknown" entry which is useless for the
+    // interface table/selector. Prefer the realtime SNMP walk (real names)
+    // whenever InfluxDB only produced "unknown" interfaces.
+    if (interfaces.length > 0 && interfaces.every(i => !i.interface_name || i.interface_name === 'unknown')) {
+      interfaces.length = 0;
+    }
 
     // 2b. Fallback to real-time SNMP walk for newly-added devices
     // (no InfluxDB data yet because Telegraf hasn't written with new device_id)
@@ -582,10 +589,15 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
         polling_interval: device.polling_interval,
         status: device.status,
         last_seen: device.last_seen,
-        created_at: device.created_at
+        created_at: device.created_at,
+        // Inventory fields are optional — the devices table may not have these
+        // columns yet, so pass through whatever the row exposes (UI renders "—").
+        vendor: device.vendor ?? null,
+        model: device.model ?? null,
+        routeros_version: device.routeros_version ?? null
       },
       interfaces,
-      packet_rates: packetRates,
+      interface_rates: throughputRates,
       error_counters: errorCounters,
       latency_history: effectiveLatencyHist,
       latency_summary: latencySummary,
@@ -950,6 +962,15 @@ router.get('/live-feed', async (req, res) => {
 // 4c. Reports - SLA & agregat 30 hari (data riil dari daily_uptime + InfluxDB)
 router.get('/reports/sla', async (req, res) => {
   try {
+    // Seed daily_uptime dari data ping InfluxDB sebelum membaca tabel
+    if (db.isPostgresConnected()) {
+      try {
+        await uptimeService.ensureDailyUptime();
+      } catch (e) {
+        console.warn('[Reports] daily uptime sync failed:', e.message);
+      }
+    }
+
     let daily = [];
     if (db.isPostgresConnected()) {
       try {
@@ -960,7 +981,7 @@ router.get('/reports/sla', async (req, res) => {
            ORDER BY date ASC`
         );
         daily = r.rows.map(row => ({
-          date: row.date,
+          date: pgDateToStr(row.date),
           total_checks: parseInt(row.total_checks, 10) || 0,
           successful_checks: parseInt(row.successful_checks, 10) || 0,
           uptime_percentage: parseFloat(row.uptime_percentage)

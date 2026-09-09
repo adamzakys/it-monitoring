@@ -45,6 +45,14 @@ const OID = {
   lldpRemSysName: '.1.0.8802.1.1.2.1.4.1.1.9',     // LLDP-MIB::lldpRemSysName
   lldpRemSysDesc: '.1.0.8802.1.1.2.1.4.1.1.10',    // LLDP-MIB::lldpRemSysDesc
 
+  // LLDP-MIB: lldpRemManAddrTable — Management Address TLV.
+  // Standard place where a neighbor advertises its IP. Previously never
+  // walked, which is why unmanaged nodes always showed IP "unknown".
+  lldpRemManAddrSubtree: '.1.0.8802.1.1.2.1.4.2',   // whole table (probe)
+  lldpRemManAddrIfSubtype: '.1.0.8802.1.1.2.1.4.2.1.1', // lldpRemManAddrIfSubtype
+  lldpRemManAddrIfId: '.1.0.8802.1.1.2.1.4.2.1.2',      // lldpRemManAddrIfId
+  lldpRemManAddr: '.1.0.8802.1.1.2.1.4.2.1.4',          // lldpRemManAddr (addr octets)
+
   // CDP (Cisco): cdpCacheTable
   cdpCacheAddr: '.1.3.6.1.4.1.9.9.23.1.2.1.1.4',   // cdpCacheAddress (IPv4)
   cdpCacheDeviceId: '.1.3.6.1.4.1.9.9.23.1.2.1.1.6', // cdpCacheDeviceId
@@ -268,31 +276,104 @@ async function getArpTable(device) {
 }
 
 /**
+ * Lenient IPv6 literal check (the const RE_IPV6 only accepts a few shapes
+ * and rejects compressed forms like "fe80::8c5a:7798:4cad:9472").
+ */
+function looksLikeIpv6(value) {
+  const s = String(value || '').trim();
+  if (!s.includes(':')) return false;
+  if (s.includes(':::')) return false;
+  const dbl = s.split('::');
+  if (dbl.length > 2) return false;
+  const ok = dbl.every(side =>
+    side.split(':').every(seg =>
+      seg === '' || /^[0-9A-Fa-f]{1,4}$/.test(seg) || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(seg)
+    )
+  );
+  return ok;
+}
+
+/**
+ * Decode an SNMP scalar value that may carry an IP address.
+ * Accepts:
+ *  - plain dotted IPv4 / IPv6 literal ("192.168.1.1", "fe80::1")
+ *  - hex pairs ("C0 A8 01 01" or "C0:A8:01:01") → IPv4/IPv6
+ * Returns normalized IP string or null.
+ */
+function decodeSnmpAddress(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (RE_IPV4.test(raw) || looksLikeIpv6(raw)) return raw;
+
+  // Hex-STRING style octets (4 bytes → IPv4, 16 bytes → IPv6)
+  if (/^[0-9A-Fa-f]{2}([:\s][0-9A-Fa-f]{2})+$/.test(raw)) {
+    const bytes = raw.split(/[:\s]+/).map(b => parseInt(b, 16));
+    if (bytes.length === 4) {
+      return bytes.join('.');
+    }
+    if (bytes.length === 16) {
+      const groups = [];
+      for (let i = 0; i < 16; i += 2) {
+        groups.push(((bytes[i] << 8) | bytes[i + 1]).toString(16));
+      }
+      // RFC 5952-style compression of the longest zero run
+      let bestStart = -1;
+      let bestLen = 0;
+      let curStart = -1;
+      let curLen = 0;
+      for (let i = 0; i < 8; i++) {
+        if (groups[i] === '0') {
+          if (curStart === -1) curStart = i;
+          curLen++;
+          if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+        } else {
+          curStart = -1;
+          curLen = 0;
+        }
+      }
+      let out;
+      if (bestLen >= 2) {
+        out = groups.slice(0, bestStart).concat([''], groups.slice(bestStart + bestLen)).join(':');
+      } else {
+        out = groups.join(':');
+      }
+      return out;
+    }
+  }
+  return null;
+}
+
+/**
  * Parse LLDP walk output.
- * Returns array of { index, chassisId, portId, portDesc, sysName, sysDesc }
+ * Returns array of { index, chassisId, portId, portDesc, sysName, sysDesc, ip }
  * Note: Mikrotik returns OIDs in numeric form (iso.0.8802...) not textual,
  * so we match by numeric suffix, not by string contains.
  * OIDs from snmpWalk may have "iso." prefix that we need to normalize.
+ *
+ * Also consumes the lldpRemManAddr* walk rows (Management Address TLV) and
+ * attaches the advertised IP to the matching remote neighbor, keyed by the
+ * same remote index that lldpRemTable uses.
  */
 function parseLldpWalk(walkResults) {
   // OID pattern in lldpRemTable: ...1.4.1.1.<field>.<index>
   // Field IDs (last digit of lldpRemEntry OID): 5=chassisId, 7=portId,
   // 8=portDesc, 9=sysName, 10=sysDesc
   const FIELD_PATTERN = '.1.4.1.1.';
+  // lldpRemManAddrTable pattern: ...1.4.2.1.<field>.<time>.<port>.<remIndex>[.<subtype>.<addr>...]
+  const MAN_PATTERN = '.1.4.2.1.';
   const byIndex = {};
+
+  const normalizeOid = (oid) => (oid.startsWith('iso.') ? '.' + oid.substring(4) : oid);
+
   for (const r of walkResults) {
     if (!byIndex[r.index]) byIndex[r.index] = {};
-    // Normalize OID: strip "iso." prefix
-    let oid = r.oid;
-    if (oid.startsWith('iso.')) oid = '.' + oid.substring(4);
-    // Find the field identifier: segment right after .1.4.1.1.
+    let oid = normalizeOid(r.oid);
     const idx = oid.lastIndexOf(FIELD_PATTERN);
     if (idx < 0) continue;
     const fieldSegment = oid.substring(idx + FIELD_PATTERN.length);
     const firstDot = fieldSegment.indexOf('.');
     if (firstDot < 0) continue;
     const fieldId = fieldSegment.substring(0, firstDot);
-    // Map field IDs to properties
     switch (fieldId) {
       case '5': byIndex[r.index].chassisId = r.value; break;
       case '7': byIndex[r.index].portId = r.value; break;
@@ -301,6 +382,39 @@ function parseLldpWalk(walkResults) {
       case '10': byIndex[r.index].sysDesc = r.value; break;
     }
   }
+
+  // Second pass: management address (lldpRemManAddrIfId / lldpRemManAddr).
+  for (const r of walkResults) {
+    let oid = normalizeOid(r.oid);
+    const idx = oid.lastIndexOf(MAN_PATTERN);
+    if (idx < 0) continue;
+    const fieldSegment = oid.substring(idx + MAN_PATTERN.length);
+    const parts = fieldSegment.split('.').filter(Boolean);
+    const fieldId = parts[0];
+    // Only IfId (2) and ManAddr (4) actually carry an address literal/octets.
+    if (fieldId !== '2' && fieldId !== '4') continue;
+    const ip = decodeSnmpAddress(r.value);
+    if (!ip) continue;
+
+    // Instance layout: <timeMark>.<localPort>.<remIndex>[.<addrSubtype>.<addr>...]
+    const nums = parts.slice(1).map(Number);
+    if (nums.length === 0) continue;
+    // Candidate keys in priority order: classic remIndex position, then last.
+    const keys = [];
+    if (nums.length >= 3) keys.push(String(nums[2]));
+    keys.push(String(nums[nums.length - 1]));
+
+    let target = null;
+    for (const k of keys) {
+      if (byIndex[k]) { target = byIndex[k]; break; }
+    }
+    if (!target) continue;
+    // Prefer IPv4 (matches our device inventory addressing) over IPv6.
+    if (!target.ip || RE_IPV4.test(ip)) {
+      target.ip = ip;
+    }
+  }
+
   return Object.values(byIndex).filter(n => n.chassisId);
 }
 
@@ -558,8 +672,8 @@ async function discoverTopology() {
 
     // Walk LLDP
     try {
-      const lldpWalk = await snmpWalk(device.ip_address, OID.lldpRemChassisId, device.snmp_community || 'public');
-      // We need to walk the whole table — run separate walks per field
+      // We need to walk the whole table — run separate walks per field.
+      // Includes lldpRemManAddr* (management address = neighbor IP).
       const allLldpResults = [];
       for (const fieldOid of [
         OID.lldpRemChassisId,
@@ -571,6 +685,10 @@ async function discoverTopology() {
         const r = await snmpWalk(device.ip_address, fieldOid, device.snmp_community || 'public');
         allLldpResults.push(...r);
       }
+      // Management-address TLV (neighbor IP). MikroTik only answers a full
+      // subtree walk (per-column walks return nothing), same quirk as ARP.
+      const manAddrRows = await snmpWalk(device.ip_address, OID.lldpRemManAddrSubtree, device.snmp_community || 'public');
+      allLldpResults.push(...manAddrRows);
 
       const neighbors = parseLldpWalk(allLldpResults);
       for (const n of neighbors) {

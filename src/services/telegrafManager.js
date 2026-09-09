@@ -104,7 +104,9 @@ function buildTelegrafConfig(device) {
   urls = ["${device.ip_address}"]
   count = 1
   ping_interval = 1.0
-  timeout = 2
+  # Telegraf inputs.ping typing: Timeout=float seconds, Deadline=int seconds.
+  # integer timeout or float deadline makes TOML unmarshal fail on restart.
+  timeout = 2.0
   deadline = 2
   binary = "ping"
   [inputs.ping.tags]
@@ -132,6 +134,13 @@ function buildTelegrafConfig(device) {
     oid = "IF-MIB::ifXTable"
     name = "net_interface"
     inherit_tags = ["device_id", "device_name", "device_ip"]
+
+    # Tag the interface name so backend queries (traffic history/RX-TX table)
+    # can group per interface — previously only ifName FIELD was written.
+    [[inputs.snmp.table.field]]
+      oid = "IF-MIB::ifName"
+      name = "interface_name"
+      is_tag = true
 
     [[inputs.snmp.table.field]]
       oid = "IF-MIB::ifHCInOctets"
@@ -202,6 +211,9 @@ function buildTelegrafConfig(device) {
 # 4. SNMP System Metrics (60s — uptime, CPU, storage)
 [[inputs.snmp]]
   interval = "60s"
+  # Write the single uptime field to the "system" measurement (backend reads
+  # uptime_ticks from measurement "system", not the default "snmp").
+  name_override = "system"
   agents = ["udp://${device.ip_address}:${snmpPort}"]
   version = 2
   community = "${community}"

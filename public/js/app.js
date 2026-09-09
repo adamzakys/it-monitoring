@@ -6,8 +6,8 @@
 // Global Application State
 const state = {
   devices: [],
-  selectedDeviceId: 1,
-  selectedInterface: 'ether1-WAN',
+  selectedDeviceId: null,
+  selectedInterface: '',
   activeFilter: 'all',
   searchQuery: '',
   alerts: [],
@@ -21,13 +21,31 @@ const state = {
     detailRtt: null,
     detailLoss: null
   },
+  // Single shared sliding-window traffic buffer (max 60 pts). Both the
+  // right-side "Real-Time Throughput Stream" and the DIC "Live Traffic"
+  // chart read from these exact arrays — one source of truth, appended per
+  // WS tick. The window grows up to 60 points, then appends+shifts; it is
+  // never pre-filled with zeros or nulls (those made charts look "empty").
   chartBuffer: {
-    labels: Array(60).fill(''),
-    inData: Array(60).fill(0),
-    outData: Array(60).fill(0)
+    labels: [],
+    inData: [],
+    outData: []
   },
+  // QoS sliding buffers (RTT min/avg/max + packet loss), fed per tick and
+  // only reseeded from the backend when the WS stream is stale.
+  detailRttBuffer: { labels: [], min: [], avg: [], max: [] },
+  detailLossBuffer: { labels: [], values: [] },
+  detailLastTickAt: 0,
+  // Last time the SHARED traffic buffer received a realtime tick. A single
+  // 5s fallback poller (see startTrafficPolling) refills from the backend
+  // only when this goes stale — traffic display never freezes, even if the
+  // WebSocket stream stalls.
+  lastTrafficTickAt: 0,
+  trafficPollTimer: null,
+  trafficPollInFlight: false,
   alertDedup: new Set(), // key: "deviceId:type:severity"
   detailData: null,
+  detailDeviceId: null,
   detailPollingTimer: null,
   topologyNetwork: null,
   topologyData: null,
@@ -46,6 +64,9 @@ async function initApp() {
   setupEventListeners();
   await loadInitialData();
   connectWebSocket();
+  // Single traffic scheduler (5s). Guarantees the Real-Time Throughput and
+  // Live Traffic windows keep moving even when the WS stream stalls/drops.
+  startTrafficPolling();
 }
 
 /**
@@ -84,6 +105,11 @@ async function loadInitialData() {
     // atau belum selesai SNMP walk), ambil via direct SNMP walk real-time.
     // Berjalan async parallel agar tidak block UI.
     enrichDevicesWithRealtimeSnmp();
+
+    // Pastikan stream realtime punya target: jika device terpilih sudah tidak
+    // ada (mis. default id lama), pilih device pertama agar Right Analytics
+    // Throughput langsung bergerak tanpa harus klik kartu dulu.
+    ensureStreamSelection();
   } catch (err) {
     console.error('Initial data loading failed:', err);
   }
@@ -134,9 +160,21 @@ function initCharts() {
     if (saved) {
       const parsed = JSON.parse(saved);
       if (parsed && parsed.labels && parsed.inData && parsed.outData) {
-        state.chartBuffer.labels = parsed.labels;
-        state.chartBuffer.inData = parsed.inData;
-        state.chartBuffer.outData = parsed.outData;
+        // Normalize legacy buffers: drop empty-label prefixes, cap at 60.
+        let labels = Array.isArray(parsed.labels) ? parsed.labels.slice() : [];
+        let inData = Array.isArray(parsed.inData) ? parsed.inData.slice() : [];
+        let outData = Array.isArray(parsed.outData) ? parsed.outData.slice() : [];
+        while (labels.length > 0 && labels[0] === '') { labels.shift(); inData.shift(); outData.shift(); }
+        if (labels.length > 60) {
+          labels = labels.slice(-60);
+          inData = inData.slice(-60);
+          outData = outData.slice(-60);
+        }
+        if (labels.length > 0) {
+          state.chartBuffer.labels = labels;
+          state.chartBuffer.inData = inData;
+          state.chartBuffer.outData = outData;
+        }
       }
     }
   } catch (e) { /* ignore corrupt data */ }
@@ -333,35 +371,30 @@ function handleWsMessage(msg) {
     // Update card telemetry
     updateCardTelemetry(msg.deviceId, msg.latency, msg.packetLoss, msg.status);
 
-    // Only feed chart if it matches currently selected device and interface
+    // Feed the shared 60pt sliding window ONLY for the subscribed
+    // device+interface — this moves BOTH the right Analytics Throughput
+    // chart and the DIC Live Traffic chart (same arrays, no reset).
     if (msg.deviceId === state.selectedDeviceId && msg.interfaceName === state.selectedInterface) {
-      const inVal = typeof msg.inMbps === 'number' ? msg.inMbps.toFixed(2) : '0.00';
-      const outVal = typeof msg.outMbps === 'number' ? msg.outMbps.toFixed(2) : '0.00';
+      const inVal = formatMbps(msg.inMbps);
+      const outVal = formatMbps(msg.outMbps);
       document.getElementById('live-in-rate').textContent = `${inVal}`;
       document.getElementById('live-out-rate').textContent = `${outVal}`;
-
-      // Update Sliding Window Buffer (60 points FIFO)
-      state.chartBuffer.labels.shift();
-      state.chartBuffer.labels.push(msg.timestamp);
-
-      state.chartBuffer.inData.shift();
-      state.chartBuffer.inData.push(msg.inMbps || 0);
-
-      state.chartBuffer.outData.shift();
-      state.chartBuffer.outData.push(msg.outMbps || 0);
-
-      // Ultra-lightweight chart update
-      state.charts.traffic.update('none');
-
-      // Persist buffer to localStorage
-      try {
-        localStorage.setItem('bms_chart_buffer', JSON.stringify({
-          labels: state.chartBuffer.labels,
-          inData: state.chartBuffer.inData,
-          outData: state.chartBuffer.outData
-        }));
-      } catch (e) { /* ignore quota errors */ }
+      pushTrafficPoint(msg.timestamp || formatChartTime(new Date()), msg.inMbps || 0, msg.outMbps || 0);
     }
+
+    // While the Device Detail panel is open, feed this tick into its
+    // QoS charts (RTT/loss) + health summary (device must match).
+    feedDetailRealtimeTick(msg);
+
+    // Keep the live feed pill + quick stats current on every tick.
+    const allDevs = state.devices || [];
+    updateLiveFeedPill({
+      total: allDevs.length,
+      online: allDevs.filter(d => d.status === 'online').length,
+      avg_latency_ms: msg.latency,
+      server_time: msg.fullTime
+    });
+    if (state.activePanelTab === 'quickstats') updateQuickStats();
   } else if (msg.type === 'NEW_ALERT') {
     const alert = msg.alert;
     // Deduplicate: skip if same device+type+severity appeared in last 5 minutes
@@ -428,19 +461,6 @@ function handleWsMessage(msg) {
       avg_latency_ms: avgLat,
       server_time: msg.timestamp
     });
-  } else if (msg.type === 'METRIC_TICK') {
-    // Tick per detik: perbarui pill live dengan latency terkini
-    const allDevs = state.devices || [];
-    const total = allDevs.length;
-    const online = allDevs.filter(d => d.status === 'online').length;
-    updateLiveFeedPill({
-      total,
-      online,
-      avg_latency_ms: msg.latency,
-      server_time: msg.fullTime
-    });
-    if (state.activePanelTab === 'quickstats') updateQuickStats();
-    if (state.activePanelTab === 'incidents') renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
   }
 }
 
@@ -689,6 +709,7 @@ function updateCardTelemetry(deviceId, latency, loss, status) {
  * - DO NOT auto-open deep-dive panel; user must click "View Detail" CTA
  */
 function selectDevice(deviceId) {
+  const deviceChanged = state.selectedDeviceId !== deviceId;
   state.selectedDeviceId = deviceId;
   const dev = state.devices.find(d => d.id === deviceId);
 
@@ -697,20 +718,14 @@ function selectDevice(deviceId) {
   const targetCard = document.getElementById(`dev-card-${deviceId}`);
   if (targetCard) targetCard.classList.add('selected');
 
-  // Reset chart buffer so previous device's line doesn't connect
-  state.chartBuffer.labels = Array(60).fill('');
-  state.chartBuffer.inData = Array(60).fill(0);
-  state.chartBuffer.outData = Array(60).fill(0);
-
-  if (state.charts.traffic) {
-    state.charts.traffic.data.labels = state.chartBuffer.labels;
-    state.charts.traffic.data.datasets[0].data = state.chartBuffer.inData;
-    state.charts.traffic.data.datasets[1].data = state.chartBuffer.outData;
-    state.charts.traffic.update('none');
+  if (deviceChanged) {
+    // Switching device → clear the shared window so the previous device's
+    // line never bleeds into the new one. Same device (e.g. opening its
+    // detail panel) keeps the already-painted buffer — no needless reset.
+    resetTrafficBuffer();
+    document.getElementById('live-in-rate').textContent = '0.00 Mbps';
+    document.getElementById('live-out-rate').textContent = '0.00 Mbps';
   }
-
-  document.getElementById('live-in-rate').textContent = '0.00 Mbps';
-  document.getElementById('live-out-rate').textContent = '0.00 Mbps';
 
   if (dev) {
     document.getElementById('traffic-chart-title').textContent = `Real-Time Throughput Stream: ${dev.name}`;
@@ -772,12 +787,37 @@ function openDeviceDetail(deviceId) {
   backdrop.classList.add('active');
   document.body.style.overflow = 'hidden';
 
+  state.detailDeviceId = deviceId;
+  // Reset QoS sliding buffers + any leftover chart overlays from a previous
+  // device. The traffic buffer is shared: it is only cleared when the device
+  // actually changes (see selectDevice) so re-opening the same device keeps
+  // the already-painted realtime window.
+  state.detailRttBuffer = { labels: [], min: [], avg: [], max: [] };
+  state.detailLossBuffer = { labels: [], values: [] };
+  clearDetailChartOverlays();
+
   // Show loading state in header
   const dev = state.devices.find(d => d.id === deviceId);
   document.getElementById('detail-device-name').textContent = dev ? dev.name : `Device #${deviceId}`;
   document.getElementById('detail-device-ip').textContent = dev ? dev.ip_address : '--';
   document.getElementById('detail-device-type').textContent = dev ? dev.device_type : '--';
+  document.getElementById('detail-device-vendor').textContent = dev ? (dev.vendor || '—') : '—';
+  document.getElementById('detail-device-model').textContent = dev ? (dev.model || '—') : '—';
   setStatusPill('detail-device-status', dev ? dev.status : 'unknown');
+  const liveInd = document.getElementById('detail-live-indicator');
+  if (liveInd) {
+    liveInd.className = 'status-pill';
+    liveInd.textContent = 'LIVE';
+  }
+  // Interfaces table back to loading until the deep-dive payload arrives
+  const ifaceTbody = document.getElementById('detail-iface-tbody');
+  if (ifaceTbody) ifaceTbody.innerHTML = '<tr><td colspan="6" class="dic-empty-cell">Loading…</td></tr>';
+  const eventsList = document.getElementById('detail-events-list');
+  if (eventsList) eventsList.innerHTML = '<div class="dic-empty-state">Loading events...</div>';
+
+  // Route the realtime 1s WebSocket stream to this device + its first interface
+  // so the Live Traffic chart keeps flowing while the panel is open.
+  if (dev) selectDevice(deviceId);
 
   loadDeviceDetail(deviceId);
 
@@ -824,6 +864,10 @@ function closeDeviceDetail() {
   if (state.charts.detailRtt) { state.charts.detailRtt.destroy(); state.charts.detailRtt = null; }
   if (state.charts.detailLoss) { state.charts.detailLoss.destroy(); state.charts.detailLoss = null; }
   state.detailData = null;
+  state.detailDeviceId = null;
+  state.detailRttBuffer = { labels: [], min: [], avg: [], max: [] };
+  state.detailLossBuffer = { labels: [], values: [] };
+  state.detailLastTickAt = 0;
 
   // Remove escape key handler
   if (state.detailEscapeHandler) {
@@ -842,12 +886,32 @@ function setStatusPill(elementId, status) {
 async function loadDeviceDetail(deviceId, isRefresh = false) {
   try {
     const res = await fetch(`/api/devices/${deviceId}/deep-dive`).then(r => r.json());
-    if (!res.success) return;
+    if (!res.success) {
+      showDetailLoadError(`Failed to load runtime data: ${res.error || 'unknown error'}`);
+      return;
+    }
     state.detailData = res;
     renderDeviceDetail(res, isRefresh);
   } catch (e) {
     console.error('Failed to load device detail:', e);
+    showDetailLoadError('Failed to load runtime data');
   }
+}
+
+/**
+ * Surface a clear error in every runtime panel instead of leaving the
+ * static "Loading…"/"No ..." placeholders when the deep-dive fetch fails.
+ */
+function showDetailLoadError(message) {
+  const ifaceTbody = document.getElementById('detail-iface-tbody');
+  if (ifaceTbody) {
+    ifaceTbody.innerHTML = `<tr><td colspan="6" class="dic-empty-cell">${escapeHtml(message)}</td></tr>`;
+  }
+  const eventsList = document.getElementById('detail-events-list');
+  if (eventsList) eventsList.innerHTML = `<div class="dic-empty-state">${escapeHtml(message)}</div>`;
+  const historyList = document.getElementById('detail-history-list');
+  if (historyList) historyList.innerHTML = `<div class="dic-empty-state">${escapeHtml(message)}</div>`;
+  ['detailThroughputChart', 'detailRttChart', 'detailLossChart'].forEach(id => setDetailChartEmpty(id, 'error'));
 }
 
 function renderDeviceDetail(data, isRefresh = false) {
@@ -859,18 +923,20 @@ function renderDeviceDetail(data, isRefresh = false) {
   document.getElementById('detail-device-name').textContent = data.device.name;
   document.getElementById('detail-device-ip').textContent = data.device.ip_address;
   document.getElementById('detail-device-type').textContent = data.device.device_type || '--';
-  document.getElementById('detail-device-vendor').textContent = data.device.vendor || '--';
-  document.getElementById('detail-device-model').textContent = data.device.model || '--';
+  document.getElementById('detail-device-vendor').textContent = data.device.vendor || '—';
+  document.getElementById('detail-device-model').textContent = data.device.model || '—';
   setStatusPill('detail-device-status', data.device.status);
 
   // Device Overview
+  const ifaceCount = (data.interfaces || []).length;
   document.getElementById('detail-overview-name').textContent = data.device.name;
   document.getElementById('detail-overview-ip').textContent = data.device.ip_address;
   document.getElementById('detail-overview-type').textContent = data.device.device_type || '--';
-  document.getElementById('detail-overview-vendor').textContent = data.device.vendor || '--';
-  document.getElementById('detail-overview-model').textContent = data.device.model || '--';
-  document.getElementById('detail-overview-ros').textContent = data.device.routeros_version || '--';
+  document.getElementById('detail-overview-vendor').textContent = data.device.vendor || '—';
+  document.getElementById('detail-overview-model').textContent = data.device.model || '—';
+  document.getElementById('detail-overview-ros').textContent = data.device.routeros_version || '—';
   document.getElementById('detail-overview-polling').textContent = `${data.device.polling_interval || 1}s`;
+  document.getElementById('detail-overview-interfaces').textContent = `${ifaceCount} interface${ifaceCount !== 1 ? 's' : ''}`;
   const lastSeenEl = document.getElementById('detail-overview-lastseen');
   if (lastSeenEl && data.device.last_seen) {
     const seenDate = new Date(data.device.last_seen);
@@ -880,97 +946,12 @@ function renderDeviceDetail(data, isRefresh = false) {
     lastSeenEl.textContent = '--';
   }
 
-  // Current Health - Status
+  // Current Health - Status / Latency / Packet Loss / Uptime only.
+  // CPU & Memory moved to System Resources (single source of truth).
   setStatusPill('detail-health-status', data.device.status);
   document.getElementById('detail-health-latency').textContent = latencySummary.avg ? `${latencySummary.avg} ms` : '--';
   document.getElementById('detail-health-loss').textContent = lossSummary.avg ? `${lossSummary.avg}%` : '--';
   document.getElementById('detail-health-uptime').textContent = sys.sys_uptime_human || '--';
-
-  // Current Health - CPU
-  const cpuEl = document.getElementById('detail-health-cpu');
-  const cpuBar = document.getElementById('detail-health-cpu-bar');
-  if (sys.cpu_load_pct !== null && sys.cpu_load_pct !== undefined) {
-    const cpuVal = parseFloat(sys.cpu_load_pct).toFixed(1);
-    cpuEl.textContent = `${cpuVal}%`;
-    if (cpuBar) cpuBar.style.width = `${cpuVal}%`;
-  } else {
-    cpuEl.textContent = 'N/A';
-    if (cpuBar) cpuBar.style.width = '0%';
-  }
-
-  // Current Health - Memory
-  const memEl = document.getElementById('detail-health-memory');
-  const memBar = document.getElementById('detail-health-memory-bar');
-  if (sys.storage_entries && sys.storage_entries.length > 0) {
-    const ram = findRamEntry(sys.storage_entries);
-    if (ram) {
-      const allocUnits = ram.alloc_units || 4096;
-      const totalBytes = (ram.size || 0) * allocUnits;
-      const usedBytes = (ram.used || 0) * allocUnits;
-      if (totalBytes > 0) {
-        const usedGB = (usedBytes / (1024**3)).toFixed(2);
-        const totalGB = (totalBytes / (1024**3)).toFixed(2);
-        let pct = ((usedBytes / totalBytes) * 100).toFixed(1);
-        let displayPct = pct;
-        let displayUsed = usedGB;
-        let displayTotal = totalGB;
-        if (usedBytes > totalBytes) {
-          displayPct = '--';
-          displayUsed = totalGB;
-          displayTotal = usedGB;
-        }
-        memEl.textContent = `${displayUsed} / ${displayTotal} GB (${displayPct}%)`;
-        if (memBar) memBar.style.width = `${Math.min(parseFloat(pct) || 0, 100)}%`;
-      } else {
-        memEl.textContent = '--';
-        if (memBar) memBar.style.width = '0%';
-      }
-    } else {
-      memEl.textContent = '--';
-      if (memBar) memBar.style.width = '0%';
-    }
-  } else {
-    memEl.textContent = '--';
-    if (memBar) memBar.style.width = '0%';
-  }
-
-  // Current Health - Storage
-  const storEl = document.getElementById('detail-health-storage');
-  const storBar = document.getElementById('detail-health-storage-bar');
-  if (sys.storage_entries && sys.storage_entries.length > 0) {
-    const ram = findRamEntry(sys.storage_entries);
-    const storageEntries = sys.storage_entries.filter(e => e !== ram);
-    if (storageEntries.length > 0) {
-      const storage = storageEntries[0];
-      const allocUnits = storage.alloc_units || 4096;
-      const totalBytes = (storage.size || 0) * allocUnits;
-      const usedBytes = (storage.used || 0) * allocUnits;
-      if (totalBytes > 0) {
-        const usedGB = (usedBytes / (1024**3)).toFixed(2);
-        const totalGB = (totalBytes / (1024**3)).toFixed(2);
-        let pct = ((usedBytes / totalBytes) * 100).toFixed(1);
-        let displayPct = pct;
-        let displayUsed = usedGB;
-        let displayTotal = totalGB;
-        if (usedBytes > totalBytes) {
-          displayPct = '--';
-          displayUsed = totalGB;
-          displayTotal = usedGB;
-        }
-        storEl.textContent = `${displayUsed} / ${displayTotal} GB (${displayPct}%)`;
-        if (storBar) storBar.style.width = `${Math.min(parseFloat(pct) || 0, 100)}%`;
-      } else {
-        storEl.textContent = '--';
-        if (storBar) storBar.style.width = '0%';
-      }
-    } else {
-      storEl.textContent = 'N/A';
-      if (storBar) storBar.style.width = '0%';
-    }
-  } else {
-    storEl.textContent = '--';
-    if (storBar) storBar.style.width = '0%';
-  }
 
   // Updated timestamp
   const updatedAt = document.getElementById('detail-updated-at');
@@ -982,13 +963,66 @@ function renderDeviceDetail(data, isRefresh = false) {
     qualityUpdated.textContent = data.generated_at ? `Updated ${formatTimeAgo(new Date(data.generated_at))}` : '--';
   }
 
-  // RTT and Loss max values
-  document.getElementById('detail-rtt-avg').textContent = latencySummary.avg || '--';
-  document.getElementById('detail-loss-max').textContent = lossSummary.max || '--';
+  // System Resources section
+  const sysCpuEl = document.getElementById('detail-sys-cpu');
+  const sysCpuBar = document.getElementById('detail-sys-cpu-bar');
+  if (sysCpuEl && sys.cpu_load_pct !== null && sys.cpu_load_pct !== undefined) {
+    const cpuVal = parseFloat(sys.cpu_load_pct).toFixed(1);
+    sysCpuEl.textContent = `${cpuVal}%`;
+    if (sysCpuBar) sysCpuBar.style.width = `${cpuVal}%`;
+  } else if (sysCpuEl) {
+    sysCpuEl.textContent = '--';
+    if (sysCpuBar) sysCpuBar.style.width = '0%';
+  }
 
-  // Interface count
-  const ifaceCount = (data.interfaces || []).length;
-  document.getElementById('detail-iface-count').textContent = `${ifaceCount} interface${ifaceCount !== 1 ? 's' : ''}`;
+  const sysMemEl = document.getElementById('detail-sys-memory');
+  const sysMemBar = document.getElementById('detail-sys-memory-bar');
+  if (sysMemEl && sys.storage_entries && sys.storage_entries.length > 0) {
+    const usage = decodeStorageUsage(findRamEntry(sys.storage_entries));
+    if (usage) {
+      sysMemEl.textContent = `${usage.usedGB} / ${usage.totalGB} GB (${usage.pct}%)`;
+      if (sysMemBar) sysMemBar.style.width = `${usage.pct}%`;
+    } else {
+      sysMemEl.textContent = '--';
+      if (sysMemBar) sysMemBar.style.width = '0%';
+    }
+  } else if (sysMemEl) {
+    sysMemEl.textContent = '--';
+    if (sysMemBar) sysMemBar.style.width = '0%';
+  }
+
+  const sysStorEl = document.getElementById('detail-sys-storage');
+  const sysStorBar = document.getElementById('detail-sys-storage-bar');
+  if (sysStorEl && sys.storage_entries && sys.storage_entries.length > 0) {
+    const ram = findRamEntry(sys.storage_entries);
+    const storageEntry = (sys.storage_entries || []).find(e => e !== ram);
+    const usage = decodeStorageUsage(storageEntry);
+    if (usage) {
+      sysStorEl.textContent = `${usage.usedGB} / ${usage.totalGB} GB (${usage.pct}%)`;
+      if (sysStorBar) sysStorBar.style.width = `${usage.pct}%`;
+    } else {
+      sysStorEl.textContent = '--';
+      if (sysStorBar) sysStorBar.style.width = '0%';
+    }
+  } else if (sysStorEl) {
+    sysStorEl.textContent = '--';
+    if (sysStorBar) sysStorBar.style.width = '0%';
+  }
+
+  // Temperature: no runtime source exists yet in the deep-dive payload —
+  // keep the row visible with a placeholder instead of faking a value.
+  const sysTempEl = document.getElementById('detail-sys-temp');
+  const sysTempBar = document.getElementById('detail-sys-temp-bar');
+  const tempVal = sys.temperature_c != null ? sys.temperature_c : (sys.temperature != null ? sys.temperature : null);
+  if (sysTempEl) {
+    if (tempVal != null) {
+      sysTempEl.textContent = `${Number(tempVal).toFixed(1)}°C`;
+      if (sysTempBar) sysTempBar.style.width = `${Math.min(Math.max(Number(tempVal), 0), 100)}%`;
+    } else {
+      sysTempEl.textContent = '--';
+      if (sysTempBar) sysTempBar.style.width = '0%';
+    }
+  }
 
   // Traffic freshness
   const trafficFreshness = document.getElementById('detail-traffic-freshness');
@@ -1043,6 +1077,32 @@ function findRamEntry(storageEntries) {
   return primary;
 }
 
+/**
+ * Decode an hrStorage entry into a sane { usedGB, totalGB, pct }.
+ * RouterOS (and some SNMP agents) report hrStorageUsed > hrStorageSize,
+ * with the real total carried in "used" and the free space in "size".
+ * When that happens the fields are swapped so the math stays sane.
+ */
+function decodeStorageUsage(entry) {
+  if (!entry) return null;
+  const allocUnits = entry.alloc_units && entry.alloc_units > 0 ? entry.alloc_units : 4096;
+  let totalUnits = entry.size || 0;
+  let usedUnits = entry.used || 0;
+  if (usedUnits > totalUnits && totalUnits > 0) {
+    const freeUnits = totalUnits;
+    totalUnits = usedUnits;
+    usedUnits = Math.max(totalUnits - freeUnits, 0);
+  }
+  const totalBytes = totalUnits * allocUnits;
+  if (totalBytes <= 0) return null;
+  const usedBytes = Math.min(usedUnits * allocUnits, totalBytes);
+  return {
+    usedGB: (usedBytes / (1024 ** 3)).toFixed(2),
+    totalGB: (totalBytes / (1024 ** 3)).toFixed(2),
+    pct: ((usedBytes / totalBytes) * 100).toFixed(1)
+  };
+}
+
 async function loadDeviceEvents(deviceId) {
   const container = document.getElementById('detail-events-list');
   const countEl = document.getElementById('detail-events-count');
@@ -1060,19 +1120,33 @@ async function loadDeviceEvents(deviceId) {
     if (countEl) countEl.textContent = `${res.events.length} event${res.events.length !== 1 ? 's' : ''}`;
 
     container.innerHTML = res.events.map(e => {
-      const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--';
+      const time = e.timestamp ? new Date(e.timestamp).toLocaleString('id-ID', { hour12: false }) : '--';
       const sevClass = e.severity || 'info';
+      // events table has no free-text "message" column: build one from device + type
+      const msg = e.message || (e.device_name
+        ? `${e.device_name} ${String(e.event_type || 'event').toLowerCase()}`
+        : e.event_type || 'Event');
+      const relatedIncidentId = e.relatedIncidentId || e.related_incident_id;
+      const relatedIncident = relatedIncidentId
+        ? state.activeIncidents.find(i => i.incidentId == relatedIncidentId)
+        : state.activeIncidents.find(i => i.deviceId == e.device_id);
       return `
-        <div class="dic-event-row" data-device-id="${e.device_id}">
+        <div class="dic-event-row" data-device-id="${e.device_id}" ${relatedIncident ? `data-incident-id="${relatedIncident.incidentId}"` : ''}>
           <span class="dic-event-time">${time}</span>
-          <span class="dic-event-type ${sevClass}">${e.event_type || 'EVENT'}</span>
-          <span class="dic-event-message">${e.message || e.event_type || 'Event'}</span>
+          <span class="dic-event-type ${sevClass}">${escapeHtml(e.event_type || 'EVENT')}</span>
+          <span class="dic-event-message">${escapeHtml(msg)}</span>
+          ${relatedIncident ? '<span class="dic-history-status active">Open Incident</span>' : ''}
         </div>
       `;
     }).join('');
 
     container.querySelectorAll('.dic-event-row').forEach(row => {
       row.addEventListener('click', () => {
+        const incId = row.dataset.incidentId;
+        if (incId) {
+          openIncidentDrawerById(incId);
+          return;
+        }
         const devId = row.dataset.deviceId;
         const activeForDevice = state.activeIncidents.find(i => i.deviceId == devId);
         if (activeForDevice) {
@@ -1094,49 +1168,70 @@ async function updateDetailIncidentSection(deviceId) {
   const timelineList = document.getElementById('detail-timeline-list');
   const timelineCount = document.getElementById('detail-timeline-count');
 
-  if (!rootCauseCard || !rootCauseContent || !timelineCard || !timelineList) return;
+  if (!rootCauseCard || !timelineCard || !timelineList || !rootCauseContent) return;
 
   const activeForDevice = state.activeIncidents.find(i => i.deviceId == deviceId);
+
+  // No active incident → neutral empty states (cards stay visible).
+  // Timeline is for the ACTIVE incident only — history lives in the
+  // Incident History panel below, never duplicated here.
   if (!activeForDevice) {
-    rootCauseCard.style.display = 'none';
-    timelineCard.style.display = 'none';
+    if (rootCauseSeverity) rootCauseSeverity.style.display = 'none';
+    rootCauseContent.className = 'dic-rootcause-content';
+    rootCauseContent.innerHTML = '<div class="dic-empty-state">No active incident</div>';
+    if (timelineCount) timelineCount.textContent = '0';
+    timelineList.innerHTML = '<div class="dic-empty-state">No active incident timeline</div>';
     return;
   }
 
-  rootCauseCard.style.display = 'flex';
-  timelineCard.style.display = 'flex';
-
-  // Root Cause content
-  rootCauseContent.className = `dic-rootcause-content ${activeForDevice.currentSeverity || ''}`;
-  rootCauseContent.innerHTML = `
-    <div class="dic-rootcause-message">${activeForDevice.rootCause?.message || 'Incident'}</div>
-    ${activeForDevice.rootCause?.evidence ? `<div class="dic-rootcause-evidence">${activeForDevice.rootCause.evidence}</div>` : ''}
-  `;
+  // Root Cause content (active incident only)
+  const sev = activeForDevice.currentSeverity || 'warning';
+  rootCauseContent.className = `dic-rootcause-content ${sev === 'critical' ? 'critical' : ''}`;
+  const ev = activeForDevice.evidence || {};
+  const evidenceParts = [];
+  if (ev.maxLatency != null) evidenceParts.push(`Max latency: ${ev.maxLatency} ms`);
+  if (ev.maxPacketLoss != null) evidenceParts.push(`Max packet loss: ${ev.maxPacketLoss}%`);
+  if (ev.maxInMbps != null) evidenceParts.push(`Peak in: ${ev.maxInMbps} Mbps`);
+  if (ev.maxOutMbps != null) evidenceParts.push(`Peak out: ${ev.maxOutMbps} Mbps`);
+  const firstDetected = activeForDevice.startedAt
+    ? `First detected: ${new Date(activeForDevice.startedAt).toLocaleString('id-ID', { hour12: false })}`
+    : '';
+  rootCauseContent.innerHTML =
+    `<div class="dic-rootcause-message">${escapeHtml(activeForDevice.rootCause?.message || 'Incident')}</div>` +
+    (evidenceParts.length > 0 ? `<div class="dic-rootcause-evidence">${escapeHtml(evidenceParts.join(' • '))}</div>` : '') +
+    (firstDetected ? `<div class="dic-rootcause-evidence">${escapeHtml(firstDetected)}</div>` : '');
   if (rootCauseSeverity) {
-    rootCauseSeverity.className = `alert-severity-badge ${activeForDevice.currentSeverity}`;
-    rootCauseSeverity.textContent = (activeForDevice.currentSeverity || 'unknown').toUpperCase();
+    rootCauseSeverity.className = `alert-severity-badge ${sev}`;
+    rootCauseSeverity.textContent = sev.toUpperCase();
     rootCauseSeverity.style.display = 'inline-block';
   }
 
-  // Timeline entries
-  const timeline = activeForDevice.timeline || [];
+  // Timeline: statusHistory (newest first), legacy "timeline" key as fallback
+  const rawTimeline = activeForDevice.statusHistory || activeForDevice.timeline || [];
+  const timeline = [...rawTimeline].sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
   if (timelineCount) timelineCount.textContent = `${timeline.length} event${timeline.length !== 1 ? 's' : ''}`;
   if (timeline.length === 0) {
-    timelineList.innerHTML = '<div class="dic-empty-state">No timeline entries</div>';
-  } else {
-    timelineList.innerHTML = timeline.map(entry => {
-      const entryTime = entry.timestamp ? new Date(entry.timestamp).toLocaleString('id-ID', { hour12: false }) : '--';
-      const itemClass = entry.severity === 'critical' ? 'critical' : (entry.severity === 'warning' ? 'warning' : 'ok');
-      return `
-        <div class="dic-timeline-item ${itemClass}">
-          <div>
-            <div class="dic-timeline-status">${entry.status || entry.event || 'Event'}</div>
-            <div class="dic-timeline-time">${entryTime}</div>
-          </div>
-        </div>
-      `;
-    }).join('');
+    timelineList.innerHTML = '<div class="dic-empty-state">No active incident timeline</div>';
+    return;
   }
+
+  timelineList.innerHTML = timeline.map(entry => {
+    const entryTime = entry.timestamp ? new Date(entry.timestamp).toLocaleString('id-ID', { hour12: false }) : '--';
+    const statusKey = String(entry.status || entry.event || '').toUpperCase();
+    const itemClass = statusKey.indexOf('OFFLINE') !== -1 || entry.severity === 'critical'
+      ? 'critical'
+      : (statusKey.indexOf('WARNING') !== -1 || entry.severity === 'warning'
+        ? 'warning'
+        : 'ok');
+    return `
+      <div class="dic-timeline-item ${itemClass}">
+        <div class="dic-timeline-content">
+          <div class="dic-timeline-status">${escapeHtml(entry.event || entry.status || 'Event')}</div>
+          <div class="dic-timeline-time">${entryTime}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
 }
 
 async function loadDeviceHistory(deviceId) {
@@ -1152,10 +1247,10 @@ async function loadDeviceHistory(deviceId) {
       return;
     }
 
+    // History = PAST incidents only. The active incident is shown by the
+    // Root Cause + Timeline cards above — do not duplicate it in the list.
     const deviceHistory = (res.history || []).filter(i => i.deviceId == deviceId);
-    const activeForDevice = state.activeIncidents.find(i => i.deviceId == deviceId);
-
-    const allHistory = [...activeForDevice ? [activeForDevice] : [], ...deviceHistory].slice(0, 10);
+    const allHistory = deviceHistory.slice(0, 10);
 
     if (countEl) countEl.textContent = `${allHistory.length} incident${allHistory.length !== 1 ? 's' : ''}`;
 
@@ -1171,7 +1266,7 @@ async function loadDeviceHistory(deviceId) {
       return `
         <div class="dic-history-item" data-incident-id="${inc.incidentId}">
           <span class="dic-history-severity alert-severity-badge ${sevClass}">${(inc.currentSeverity || 'info').toUpperCase()}</span>
-          <span class="dic-history-message">${inc.rootCause?.message || 'Incident'}</span>
+          <span class="dic-history-message">${escapeHtml(inc.rootCause?.message || 'Incident')}</span>
           <span class="dic-history-duration">${duration}</span>
           <span class="dic-history-status ${statusClass}">${inc.status || 'active'}</span>
         </div>
@@ -1195,7 +1290,9 @@ function renderInterfaceTable(data) {
   if (!tbody) return;
   const ifaces = data.interfaces || [];
   const ratesByName = {};
-  (data.packet_rates || []).forEach(p => { ratesByName[p.interface_name] = p; });
+  // Current per-interface Mbps snapshot (RX/TX columns). Legacy fallback kept
+  // so the table never silently blanks if an older payload arrives.
+  (data.interface_rates || data.packet_rates || []).forEach(p => { ratesByName[p.interface_name] = p; });
   const errByName = {};
   (data.error_counters || []).forEach(p => { errByName[p.interface_name] = p; });
 
@@ -1263,7 +1360,26 @@ function populateDetailIfaceSelect(data) {
   });
   if (previous && ifaces.find(i => i.interface_name === previous)) {
     sel.value = previous;
+  } else {
+    // Prefer the first real (non-loopback) interface for the traffic chart
+    const wired = findFirstWiredInterface(ifaces);
+    if (wired) sel.value = wired;
   }
+
+  // Keep the WebSocket stream in sync with the interface shown in the panel
+  if (sel.value && isDetailOpen() && state.selectedInterface !== sel.value) {
+    state.selectedInterface = sel.value;
+    subscribeSelectedStream();
+  }
+}
+
+function findFirstWiredInterface(ifaces) {
+  const preferred = (ifaces || []).find(i => {
+    const n = String(i.interface_name || '').toLowerCase();
+    return !(n === 'lo' || n === 'lo0' || n.startsWith('lo:') || n.startsWith('loopback') ||
+             n === 'null0' || n.startsWith('null') || n === 'unknown');
+  });
+  return preferred ? preferred.interface_name : (ifaces[0] ? ifaces[0].interface_name : '');
 }
 
 function initDetailCharts() {
@@ -1279,17 +1395,25 @@ function initDetailCharts() {
   state.charts.detailThroughput = new Chart(tpCtx, {
     type: 'line',
     data: {
-      labels: [],
+      labels: state.chartBuffer.labels,
       datasets: [
-        { label: 'Inbound (Mbps)', data: [], borderColor: '#00f2fe', backgroundColor: gradIn, fill: true, tension: 0.3, borderWidth: 2, pointRadius: 0 },
-        { label: 'Outbound (Mbps)', data: [], borderColor: '#ff9900', backgroundColor: gradOut, fill: true, tension: 0.3, borderWidth: 2, pointRadius: 0 }
+        { label: 'Inbound (Mbps)', data: state.chartBuffer.inData, borderColor: '#00f2fe', backgroundColor: gradIn, fill: true, tension: 0.3, borderWidth: 2, pointRadius: 0 },
+        { label: 'Outbound (Mbps)', data: state.chartBuffer.outData, borderColor: '#ff9900', backgroundColor: gradOut, fill: true, tension: 0.3, borderWidth: 2, pointRadius: 0 }
       ]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          mode: 'index',
+          intersect: false,
+          callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} Mbps` }
+        }
+      },
       scales: {
         x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 6 } },
         y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#64748b', font: { size: 9 }, callback: (v) => `${v} Mbps` } }
@@ -1297,23 +1421,27 @@ function initDetailCharts() {
     }
   });
 
-  // 2. RTT min/avg/max
+  // 2. RTT min/avg/max (colors match the panel legend)
   const rttCtx = document.getElementById('detailRttChart').getContext('2d');
   state.charts.detailRtt = new Chart(rttCtx, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        { label: 'min', data: [], borderColor: '#10b981', borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
-        { label: 'avg', data: [], borderColor: '#2596BE', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: false },
-        { label: 'max', data: [], borderColor: '#ef4444', borderWidth: 1.5, pointRadius: 0, tension: 0.3 }
+        { label: 'min', data: [], borderColor: '#10b981', borderWidth: 1.5, pointRadius: 0, tension: 0.3, spanGaps: true },
+        { label: 'avg', data: [], borderColor: '#00f2fe', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: false, spanGaps: true },
+        { label: 'max', data: [], borderColor: '#ef4444', borderWidth: 1.5, pointRadius: 0, tension: 0.3, spanGaps: true }
       ]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false, callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} ms` } } },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { mode: 'index', intersect: false, callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} ms` } }
+      },
       scales: {
         x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 6 } },
         y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#64748b', font: { size: 9 }, callback: (v) => `${v} ms` } }
@@ -1321,58 +1449,399 @@ function initDetailCharts() {
     }
   });
 
-  // 3. Packet Loss (bar)
+  // 3. Packet Loss — time-series LINE chart. Loss spikes are drawn red,
+  // healthy 0% segments stay amber. (No bar/histogram.)
   const lossCtx = document.getElementById('detailLossChart').getContext('2d');
   state.charts.detailLoss = new Chart(lossCtx, {
-    type: 'bar',
+    type: 'line',
     data: {
       labels: [],
-      datasets: [{ label: 'Loss %', data: [], backgroundColor: 'rgba(245, 158, 11, 0.55)', borderColor: '#f59e0b', borderWidth: 1 }]
+      datasets: [{
+        label: 'Packet Loss',
+        data: [],
+        borderColor: '#f59e0b',
+        backgroundColor: 'rgba(245, 158, 11, 0.12)',
+        fill: true,
+        tension: 0,
+        borderWidth: 1.5,
+        pointRadius: 0,
+        spanGaps: false,
+        segment: {
+          borderColor: (ctx) => (ctx.p0.parsed.y > 0 || ctx.p1.parsed.y > 0) ? '#ef4444' : '#f59e0b'
+        },
+        pointBackgroundColor: (ctx) => (ctx.raw > 0 ? '#ef4444' : '#f59e0b'),
+        pointBorderColor: (ctx) => (ctx.raw > 0 ? '#ef4444' : '#f59e0b')
+      }]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => `Loss: ${ctx.parsed.y.toFixed(2)}%` } } },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { mode: 'index', intersect: false, callbacks: { label: (ctx) => `Loss: ${ctx.parsed.y.toFixed(2)}%` } }
+      },
       scales: {
         x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 6 } },
-        y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#64748b', font: { size: 9 }, callback: (v) => `${v}%` } }
+        y: { beginAtZero: true, suggestedMax: 100, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#64748b', font: { size: 9 }, callback: (v) => `${v}%` } }
       }
     }
   });
 }
 
+/**
+ * Update detail charts from a deep-dive payload WITHOUT recreating datasets:
+ * - Live Traffic / Real-Time Throughput read the shared chartBuffer. The
+ *   single 5s traffic poller (startTrafficPolling) refills it when the WS
+ *   stream is stale; this function NEVER fetches traffic itself, so there is
+ *   exactly one writer + one fallback scheduler.
+ * - RTT / Packet Loss use their own sliding buffers, seeded from this payload
+ *   when empty/stale, otherwise kept alive by the per-second ticks.
+ */
 function updateDetailCharts(data) {
-  const selIface = document.getElementById('detail-interface-select')?.value;
-  if (!selIface) return;
+  const finalIface = document.getElementById('detail-interface-select')?.value || '';
+  const wsOpen = !!(state.ws && state.ws.readyState === WebSocket.OPEN);
+  const wsFresh = (Date.now() - state.detailLastTickAt) < 8000;
+  const live = wsOpen && wsFresh;
+  const chartAlive = state.charts.detailThroughput;
 
-  // Re-query throughput history for selected interface from a fresh fetch
-  // (we use the latency/loss histories that were already returned by deep-dive,
-  // but throughput per-interface 5m history requires a second call).
-  fetchThroughputHistory(data.device.id, selIface).then(points => {
-    if (state.charts.detailThroughput && points) {
-      state.charts.detailThroughput.data.labels = points.labels;
-      state.charts.detailThroughput.data.datasets[0].data = points.inMbps;
-      state.charts.detailThroughput.data.datasets[1].data = points.outMbps;
-      state.charts.detailThroughput.update('none');
+  if (finalIface && chartAlive) {
+    // Just reflect the shared window's current state; the poller handles
+    // backfill whenever the WS is not feeding it.
+    setDetailChartEmpty('detailThroughputChart',
+      state.chartBuffer.labels.length > 0 ? 'ok' : 'empty');
+  } else if (chartAlive) {
+    setDetailChartEmpty('detailThroughputChart', 'empty');
+  }
+
+  const needQosSeed = !live || state.detailRttBuffer.labels.length === 0;
+  if (needQosSeed) {
+    seedQosBuffers(data);
+  }
+  renderQosCharts(data);
+}
+
+/* ============================================================
+   SHARED SLIDING-WINDOW TRAFFIC PIPELINE
+   state.chartBuffer (60 pts) is the single source of truth for BOTH
+   the right Analytics "Real-Time Throughput Stream" and the DIC
+   "Live Traffic" hero chart. Datasets are persistent; we append +
+   shift, never recreate the chart or its arrays.
+   ============================================================ */
+
+function ensureStreamSelection() {
+  if (!state.devices || state.devices.length === 0) return;
+  const exists = state.devices.some(d => d.id === state.selectedDeviceId);
+  if (!exists) {
+    selectDevice(state.devices[0].id);
+  } else {
+    subscribeSelectedStream();
+  }
+}
+
+function resetTrafficBuffer() {
+  state.chartBuffer = { labels: [], inData: [], outData: [] };
+  rebindTrafficCharts();
+}
+
+function rebindTrafficCharts() {
+  const b = state.chartBuffer;
+  [state.charts.traffic, state.charts.detailThroughput].forEach(ch => {
+    if (!ch) return;
+    ch.data.labels = b.labels;
+    ch.data.datasets[0].data = b.inData;
+    ch.data.datasets[1].data = b.outData;
+  });
+}
+
+function refreshSharedTrafficCharts() {
+  rebindTrafficCharts();
+  [state.charts.traffic, state.charts.detailThroughput].forEach(ch => {
+    if (ch) ch.update('none');
+  });
+  if (isDetailOpen()) {
+    setDetailChartEmpty('detailThroughputChart', state.chartBuffer.labels.length > 0 ? 'ok' : 'empty');
+  }
+}
+
+/** Append one point (backend timestamp); drop the oldest once >60 — pure FIFO. */
+function pushTrafficPoint(label, inMbps, outMbps) {
+  state.lastTrafficTickAt = Date.now();
+  state.chartBuffer.labels.push(label);
+  state.chartBuffer.inData.push(Number(inMbps) || 0);
+  state.chartBuffer.outData.push(Number(outMbps) || 0);
+  if (state.chartBuffer.labels.length > 60) {
+    state.chartBuffer.labels.shift();
+    state.chartBuffer.inData.shift();
+    state.chartBuffer.outData.shift();
+  }
+
+  try {
+    localStorage.setItem('bms_chart_buffer', JSON.stringify({
+      labels: state.chartBuffer.labels,
+      inData: state.chartBuffer.inData,
+      outData: state.chartBuffer.outData
+    }));
+  } catch (e) { /* ignore quota errors */ }
+
+  refreshSharedTrafficCharts();
+}
+
+/**
+ * Backfill the shared buffer from the interface-history payload
+ * (rescue mode: only used while the WS stream is down/stale).
+ * Points are inserted chronologically — no empty/null padding.
+ */
+function seedTrafficBuffer(points) {
+  const src = points || {};
+  const srcLabels = src.labels || [];
+  if (srcLabels.length === 0) {
+    if (isDetailOpen()) {
+      setDetailChartEmpty('detailThroughputChart',
+        state.chartBuffer.labels.length > 0 ? 'ok' : 'empty');
+    }
+    return; // keep whatever live ticks already painted
+  }
+  const from = Math.max(0, srcLabels.length - 60);
+  state.chartBuffer = {
+    labels: srcLabels.slice(from),
+    inData: (src.inMbps || []).slice(from).map(v => Number(v) || 0),
+    outData: (src.outMbps || []).slice(from).map(v => Number(v) || 0)
+  };
+  refreshSharedTrafficCharts();
+  if (isDetailOpen()) {
+    setDetailChartEmpty('detailThroughputChart', 'ok');
+  }
+}
+
+/**
+ * ONE shared traffic scheduler (started once at boot). Every 5s it checks
+ * whether the WS stream is still feeding the shared window; when it is not
+ * (socket closed or no tick for >8s) it refills the window from the backend
+ * interface-history endpoint so Live Traffic / Real-Time Throughput never
+ * freeze. When the WS is healthy it does nothing (no duplicate fetches).
+ */
+function startTrafficPolling() {
+  if (state.trafficPollTimer) clearInterval(state.trafficPollTimer);
+  state.trafficPollTimer = setInterval(trafficPollTick, 5000);
+}
+
+async function trafficPollTick() {
+  if (state.trafficPollInFlight) return; // don't stack requests
+  const wsOpen = !!(state.ws && state.ws.readyState === WebSocket.OPEN);
+  const fresh = (Date.now() - state.lastTrafficTickAt) < 8000;
+  if (wsOpen && fresh) return; // realtime already moving the window
+
+  const devId = state.selectedDeviceId;
+  const iface = state.selectedInterface;
+  if (devId == null || !iface) return;
+
+  state.trafficPollInFlight = true;
+  try {
+    const points = await fetchThroughputHistory(devId, iface);
+    if (!points || !points.labels || points.labels.length === 0) {
+      if (isDetailOpen() && state.chartBuffer.labels.length === 0) {
+        setDetailChartEmpty('detailThroughputChart', 'empty');
+      }
+      return;
+    }
+    seedTrafficBuffer(points);
+  } catch (e) {
+    /* silent — next poll retries */
+  } finally {
+    state.trafficPollInFlight = false;
+  }
+}
+
+/* ============================================================
+   QOS SLIDING BUFFERS (RTT min/avg/max + packet loss)
+   Seeded once per open / stale WS, then appended per tick.
+   ============================================================ */
+
+const QOS_WINDOW = 90;
+
+function seedQosBuffers(data) {
+  const rtt = { labels: [], min: [], avg: [], max: [] };
+  (data.latency_history || []).forEach(p => {
+    if (rtt.labels.length >= QOS_WINDOW) return;
+    rtt.labels.push(formatChartTime(p.time));
+    rtt.min.push(p.min);
+    rtt.avg.push(p.avg);
+    rtt.max.push(p.max);
+  });
+  state.detailRttBuffer = rtt;
+
+  const loss = { labels: [], values: [] };
+  (data.loss_history || []).forEach(p => {
+    if (loss.labels.length >= QOS_WINDOW) return;
+    loss.labels.push(formatChartTime(p.time));
+    loss.values.push(p.value);
+  });
+  state.detailLossBuffer = loss;
+}
+
+function renderQosCharts(data) {
+  const rttChart = state.charts.detailRtt;
+  if (rttChart) {
+    const b = state.detailRttBuffer;
+    rttChart.data.labels = b.labels;
+    rttChart.data.datasets[0].data = b.min;
+    rttChart.data.datasets[1].data = b.avg;
+    rttChart.data.datasets[2].data = b.max;
+    rttChart.update('none');
+    setDetailChartEmpty('detailRttChart', b.labels.length > 0 ? 'ok' : 'empty');
+  }
+
+  const lossChart = state.charts.detailLoss;
+  if (lossChart) {
+    const b = state.detailLossBuffer;
+    lossChart.data.labels = b.labels;
+    lossChart.data.datasets[0].data = b.values;
+    lossChart.update('none');
+    setDetailChartEmpty('detailLossChart', b.labels.length > 0 ? 'ok' : 'empty');
+    // Packet Loss ANGKA + chart baca buffer yang sama: angka mengikuti
+    // titik terbaru grafik (bukan rata-rata terpisah).
+    const healthLoss = document.getElementById('detail-health-loss');
+    if (healthLoss && b.values.length > 0) {
+      const v = Number(b.values[b.values.length - 1]);
+      healthLoss.textContent = `${v.toFixed(2)}%`;
+      healthLoss.style.color = v > 0 ? 'var(--color-warning)' : 'inherit';
+    }
+  }
+
+  syncLossMaxHeader(data);
+}
+
+/** Packet Loss number + chart read the same source: the loss buffer max. */
+function syncLossMaxHeader(data) {
+  const lossMaxEl = document.getElementById('detail-loss-max');
+  if (!lossMaxEl) return;
+  const values = state.detailLossBuffer.values || [];
+  let max = null;
+  if (values.length > 0) {
+    max = values.reduce((a, b) => Math.max(a, b), -Infinity);
+  }
+  if (max == null || !isFinite(max)) {
+    max = (data && data.loss_summary && data.loss_summary.max != null) ? data.loss_summary.max : null;
+  }
+  lossMaxEl.textContent = max != null && isFinite(max) ? String(Number(max).toFixed(2)) : '--';
+}
+
+/** Append one 1s tick to the QoS sliding buffers (FIFO, QOS_WINDOW cap). */
+function pushQosTick(msg, tickLabel) {
+  if (msg.latency != null && (msg.packetLoss == null || Number(msg.packetLoss) < 100)) {
+    const val = Number(msg.latency);
+    state.detailRttBuffer.labels.push(tickLabel);
+    state.detailRttBuffer.min.push(val);
+    state.detailRttBuffer.avg.push(val);
+    state.detailRttBuffer.max.push(val);
+    if (state.detailRttBuffer.labels.length > QOS_WINDOW) {
+      state.detailRttBuffer.labels.shift();
+      state.detailRttBuffer.min.shift();
+      state.detailRttBuffer.avg.shift();
+      state.detailRttBuffer.max.shift();
+    }
+  }
+  if (msg.packetLoss != null) {
+    state.detailLossBuffer.labels.push(tickLabel);
+    state.detailLossBuffer.values.push(Number(msg.packetLoss));
+    if (state.detailLossBuffer.labels.length > QOS_WINDOW) {
+      state.detailLossBuffer.labels.shift();
+      state.detailLossBuffer.values.shift();
+    }
+  }
+  renderQosCharts(null);
+}
+
+/**
+ * Overlay empty/error state on a chart canvas when there is nothing to plot.
+ * state: 'ok' (clear) | 'empty' (no telemetry) | 'error' (fetch failed)
+ */
+function setDetailChartEmpty(canvasId, chartState) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const wrap = canvas.closest('.dic-chart-container');
+  if (!wrap) return;
+  let overlay = wrap.querySelector('.dic-chart-empty');
+  if (chartState === 'ok') {
+    if (overlay) overlay.remove();
+    return;
+  }
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.className = 'dic-chart-empty';
+    wrap.appendChild(overlay);
+  }
+  overlay.textContent = chartState === 'error' ? 'Failed to load runtime data' : 'No telemetry available';
+}
+
+function clearDetailChartOverlays() {
+  ['detailThroughputChart', 'detailRttChart', 'detailLossChart'].forEach(canvasId => {
+    const canvas = document.getElementById(canvasId);
+    if (canvas && canvas.closest) {
+      const wrap = canvas.closest('.dic-chart-container');
+      if (wrap) {
+        const ov = wrap.querySelector('.dic-chart-empty');
+        if (ov) ov.remove();
+      }
     }
   });
+}
 
-  if (state.charts.detailRtt) {
-    const lat = data.latency_history || [];
-    state.charts.detailRtt.data.labels = lat.map(p => formatChartTime(p.time));
-    state.charts.detailRtt.data.datasets[0].data = lat.map(p => p.min);
-    state.charts.detailRtt.data.datasets[1].data = lat.map(p => p.avg);
-    state.charts.detailRtt.data.datasets[2].data = lat.map(p => p.max);
-    state.charts.detailRtt.update('none');
+function isDetailOpen() {
+  const b = document.getElementById('device-detail-backdrop');
+  return !!(b && b.classList.contains('active'));
+}
+
+/**
+ * Feeds a 1s METRIC_TICK into the open Device Detail panel:
+ * - Health Summary latency/loss/status (live numbers)
+ * - RTT + Packet Loss sliding buffers (one point per second)
+ * - Live Traffic hero, when the panel's interface differs from the
+ *   dashboard subscription (the main branch already pushes shared ticks)
+ */
+function feedDetailRealtimeTick(msg) {
+  if (!isDetailOpen()) return;
+  if (state.detailDeviceId == null || msg.deviceId != state.detailDeviceId) return;
+
+  // Marks the WS stream as fresh so 5s polls skip reseeding the charts.
+  state.detailLastTickAt = Date.now();
+
+  // Health Summary live values
+  const latEl = document.getElementById('detail-health-latency');
+  if (latEl && msg.latency != null) {
+    const isDown = msg.packetLoss != null && Number(msg.packetLoss) >= 100;
+    latEl.textContent = (!isDown && msg.latency >= 0) ? `${Number(msg.latency).toFixed(2)} ms` : '--';
+  }
+  const lossEl = document.getElementById('detail-health-loss');
+  if (lossEl && msg.packetLoss != null) {
+    const loss = Number(msg.packetLoss);
+    lossEl.textContent = `${loss.toFixed(2)}%`;
+    lossEl.style.color = loss > 0 ? 'var(--color-warning)' : 'inherit';
+  }
+  if (msg.status) setStatusPill('detail-health-status', msg.status);
+  const liveInd = document.getElementById('detail-live-indicator');
+  if (liveInd && msg.status) {
+    liveInd.className = `status-pill ${msg.status}`;
+    liveInd.textContent = (msg.status === 'online' ? '● ONLINE' : msg.status.toUpperCase());
   }
 
-  if (state.charts.detailLoss) {
-    const loss = data.loss_history || [];
-    state.charts.detailLoss.data.labels = loss.map(p => formatChartTime(p.time));
-    state.charts.detailLoss.data.datasets[0].data = loss.map(p => p.value);
-    state.charts.detailLoss.update('none');
+  const tickLabel = msg.timestamp || (msg.fullTime ? formatChartTime(msg.fullTime) : '--');
+
+  // Live Traffic hero: if this tick is for the interface shown in the panel
+  // but the dashboard subscription is elsewhere, push it anyway so the hero
+  // keeps sliding. (Normal case — same subscription — is handled by
+  // pushTrafficPoint in handleWsMessage to avoid double-append.)
+  const selMatches = (msg.deviceId === state.selectedDeviceId && msg.interfaceName === state.selectedInterface);
+  const ifaceSel = document.getElementById('detail-interface-select');
+  if (!selMatches && ifaceSel && ifaceSel.value && state.charts.detailThroughput &&
+      msg.interfaceName === ifaceSel.value) {
+    pushTrafficPoint(tickLabel, msg.inMbps || 0, msg.outMbps || 0);
   }
+
+  // QoS sliding buffers (RTT + Packet Loss), capped at QOS_WINDOW points.
+  pushQosTick(msg, tickLabel);
 }
 
 function formatChartTime(iso) {
@@ -1763,8 +2232,20 @@ function formatTimeAgo(date) {
 }
 
 /**
+ * Format throughput for the legend: enough decimals so small real traffic
+ * (e.g. 0.006 Mbps) is not rounded to a flat "0.00".
+ */
+function formatMbps(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return '0.00';
+  if (n < 0.01) return n.toFixed(4);
+  if (n < 1) return n.toFixed(3);
+  return n.toFixed(2);
+}
+
+/**
  * Format nilai metrik. Tampilkan placeholder (default '--') saat nilai
- * kosong/0/NaN agar tidak误导 (mis. latency 0 padahal tidak ada data).
+ * kosong/0/NaN agar tidak menyesatkan (mis. latency 0 padahal tidak ada data).
  */
 function formatMetric(value, unit, placeholder = '--') {
   if (value === null || value === undefined) return placeholder;
@@ -1793,15 +2274,10 @@ function setupEventListeners() {
     });
   });
 
-  // Interface Select in Chart
+  // Interface Select in Chart (right Analytics Throughput)
   document.getElementById('chart-interface-select').addEventListener('change', (e) => {
     state.selectedInterface = e.target.value;
-    state.chartBuffer.labels = Array(60).fill('');
-    state.chartBuffer.inData = Array(60).fill(0);
-    state.chartBuffer.outData = Array(60).fill(0);
-    if (state.charts.traffic) {
-      state.charts.traffic.update('none');
-    }
+    resetTrafficBuffer();
     document.getElementById('live-in-rate').textContent = '0.00';
     document.getElementById('live-out-rate').textContent = '0.00';
     subscribeSelectedStream();
@@ -1821,7 +2297,6 @@ function setupEventListeners() {
   });
 
   // Panel Tab Switching
-  let analyticsChartsInitialized = false;
   document.querySelectorAll('.panel-tab').forEach(tab => {
     tab.addEventListener('click', () => {
       const tabName = tab.dataset.panelTab;
@@ -1837,14 +2312,12 @@ function setupEventListeners() {
     if (tabName === 'alerts') renderAlertFeed(state.incidentSearch, state.incidentSevFilter);
 
       if (tabName === 'analytics') {
-        // Charts need visible container — lazy-init on first open
-        if (!analyticsChartsInitialized) {
-          analyticsChartsInitialized = true;
-          setTimeout(() => {
-            if (state.charts.traffic) state.charts.traffic.resize();
-            if (state.charts.donut) state.charts.donut.resize();
-          }, 80);
-        }
+        // Charts need a visible container — resize every time the tab opens
+        // so the latest sliding-window data is painted (no extra polling).
+        setTimeout(() => {
+          if (state.charts.traffic) state.charts.traffic.resize();
+          if (state.charts.donut) state.charts.donut.resize();
+        }, 80);
       }
 
       sessionStorage.setItem('bms_panel_tab', tabName);
@@ -2038,8 +2511,21 @@ function setupEventListeners() {
   document.getElementById('btn-device-detail-close')?.addEventListener('click', closeDeviceDetail);
   document.getElementById('btn-device-detail-x')?.addEventListener('click', closeDeviceDetail);
 
-  // Detail interface selector → refresh throughput chart for that interface
-  document.getElementById('detail-interface-select')?.addEventListener('change', () => {
+  // Detail interface selector → re-point the WS stream to the new interface.
+  // The shared buffer is cleared so data from the previous interface never
+  // mixes with the new one; the first live tick repaints it (~1s).
+  document.getElementById('detail-interface-select')?.addEventListener('change', (e) => {
+    const iface = e.target && e.target.value;
+    if (!iface) return;
+    state.selectedInterface = iface;
+    // Mirror the choice in the right Analytics dropdown (same data source).
+    const dashSel = document.getElementById('chart-interface-select');
+    if (dashSel) {
+      const optExists = Array.from(dashSel.options).some(o => o.value === iface);
+      if (optExists) dashSel.value = iface;
+    }
+    resetTrafficBuffer();
+    subscribeSelectedStream();
     if (state.detailData) updateDetailCharts(state.detailData);
   });
 
@@ -2963,8 +3449,8 @@ async function loadReportsData() {
     if (sourceEl) {
       const fromDb = res.daily_breakdown && res.daily_breakdown.length > 0;
       sourceEl.textContent = fromDb
-        ? `Aggregated from ${res.daily_breakdown.length} day(s) of daily_uptime records in PostgreSQL`
-        : 'Calculated from current device status (history not yet populated)';
+        ? `Aggregated from ${res.daily_breakdown.length} day(s) of daily_uptime records (sourced from InfluxDB ping probes)`
+        : 'History belum terisi — menunggu minimal 1 hari data ping di InfluxDB';
     }
     if (ingestionEl) {
       ingestionEl.textContent = res.influx_has_ingestion
@@ -2997,7 +3483,7 @@ async function loadReportsData() {
     const tableEl = document.getElementById('reports-daily-table');
     if (tableEl) {
       if (!res.daily_breakdown || res.daily_breakdown.length === 0) {
-        tableEl.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">No daily_uptime history available yet. Seed data will appear after first PostgreSQL connection.</div>';
+        tableEl.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Belum ada riwayat harian. Riwayat terisi otomatis dari data ping InfluxDB setelah Telegraf berjalan minimal 1 hari.</div>';
       } else {
         const rows = res.daily_breakdown.map(d => {
           const dt = new Date(d.date);
