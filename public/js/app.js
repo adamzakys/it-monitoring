@@ -410,6 +410,9 @@ function handleWsMessage(msg) {
     } else if (state.activePanelTab === 'incidents') {
       updateIncidentBadge();
     }
+  } else if (msg.type === 'DEVICE_LOG') {
+    // Real-time Device Log (syslog/SNMP trap) → panel detail yang terbuka.
+    if (isDetailOpen() && msg.log) onWsDeviceLog(msg.log);
   } else if (msg.type === 'INCIDENT_CREATED') {
     const incident = msg.incident;
     if (incident && incident.incidentId) {
@@ -800,9 +803,6 @@ function openDeviceDetail(deviceId) {
   const dev = state.devices.find(d => d.id === deviceId);
   document.getElementById('detail-device-name').textContent = dev ? dev.name : `Device #${deviceId}`;
   document.getElementById('detail-device-ip').textContent = dev ? dev.ip_address : '--';
-  document.getElementById('detail-device-type').textContent = dev ? dev.device_type : '--';
-  document.getElementById('detail-device-vendor').textContent = dev ? (dev.vendor || '—') : '—';
-  document.getElementById('detail-device-model').textContent = dev ? (dev.model || '—') : '—';
   setStatusPill('detail-device-status', dev ? dev.status : 'unknown');
   const liveInd = document.getElementById('detail-live-indicator');
   if (liveInd) {
@@ -814,12 +814,36 @@ function openDeviceDetail(deviceId) {
   if (ifaceTbody) ifaceTbody.innerHTML = '<tr><td colspan="6" class="dic-empty-cell">Loading…</td></tr>';
   const eventsList = document.getElementById('detail-events-list');
   if (eventsList) eventsList.innerHTML = '<div class="dic-empty-state">Loading events...</div>';
+  const logListEl = document.getElementById('detail-log-list');
+  if (logListEl) logListEl.innerHTML = '<div class="dic-empty-state">Loading device logs…</div>';
+  const logLive = document.getElementById('detail-log-live');
+  if (logLive) {
+    logLive.className = 'dic-live-dot stale';
+    logLive.title = 'Menunggu stream log…';
+  }
 
   // Route the realtime 1s WebSocket stream to this device + its first interface
   // so the Live Traffic chart keeps flowing while the panel is open.
   if (dev) selectDevice(deviceId);
 
+  // Init detail charts right away (instead of waiting for the first deep-dive
+  // response) so live WS ticks can start painting RTT/loss lines immediately.
+  ['detailThroughput', 'detailRtt', 'detailLoss'].forEach(k => {
+    if (state.charts[k]) { state.charts[k].destroy(); state.charts[k] = null; }
+  });
+  initDetailCharts();
+
+  // Seed the shared throughput window with 5m history right away when empty;
+  // no-op if the WS stream is already painting fresh points.
+  if (state.chartBuffer.labels.length === 0) {
+    state.lastTrafficTickAt = 0;
+    trafficPollTick();
+  }
+
   loadDeviceDetail(deviceId);
+
+  // Device Logs: muat riwayat + poll 10s selama panel terbuka (realtime via WS).
+  startDeviceLogPolling(deviceId);
 
   // Auto-refresh every 5s while panel is open
   if (state.detailPollingTimer) clearInterval(state.detailPollingTimer);
@@ -860,6 +884,9 @@ function closeDeviceDetail() {
     clearInterval(state.detailPollingTimer);
     state.detailPollingTimer = null;
   }
+  stopDeviceLogPolling();
+  const logLive = document.getElementById('detail-log-live');
+  if (logLive) logLive.className = 'dic-live-dot';
   if (state.charts.detailThroughput) { state.charts.detailThroughput.destroy(); state.charts.detailThroughput = null; }
   if (state.charts.detailRtt) { state.charts.detailRtt.destroy(); state.charts.detailRtt = null; }
   if (state.charts.detailLoss) { state.charts.detailLoss.destroy(); state.charts.detailLoss = null; }
@@ -919,39 +946,32 @@ function renderDeviceDetail(data, isRefresh = false) {
   const latencySummary = data.latency_summary || {};
   const lossSummary = data.loss_summary || {};
 
-  // Header
+  // Header — hanya name/ip/status (identitas lengkap ada di Device Overview).
   document.getElementById('detail-device-name').textContent = data.device.name;
   document.getElementById('detail-device-ip').textContent = data.device.ip_address;
-  document.getElementById('detail-device-type').textContent = data.device.device_type || '--';
-  document.getElementById('detail-device-vendor').textContent = data.device.vendor || '—';
-  document.getElementById('detail-device-model').textContent = data.device.model || '—';
   setStatusPill('detail-device-status', data.device.status);
 
-  // Device Overview
-  const ifaceCount = (data.interfaces || []).length;
-  document.getElementById('detail-overview-name').textContent = data.device.name;
-  document.getElementById('detail-overview-ip').textContent = data.device.ip_address;
+  // Device Overview — field unik (tanpa duplikat header: name/ip; tanpa
+  // duplikat kartu Interface: jumlah interface).
   document.getElementById('detail-overview-type').textContent = data.device.device_type || '--';
   document.getElementById('detail-overview-vendor').textContent = data.device.vendor || '—';
   document.getElementById('detail-overview-model').textContent = data.device.model || '—';
   document.getElementById('detail-overview-ros').textContent = data.device.routeros_version || '—';
   document.getElementById('detail-overview-polling').textContent = `${data.device.polling_interval || 1}s`;
-  document.getElementById('detail-overview-interfaces').textContent = `${ifaceCount} interface${ifaceCount !== 1 ? 's' : ''}`;
   const lastSeenEl = document.getElementById('detail-overview-lastseen');
   if (lastSeenEl && data.device.last_seen) {
     const seenDate = new Date(data.device.last_seen);
     lastSeenEl.textContent = formatTimeAgo(seenDate);
     lastSeenEl.title = seenDate.toLocaleString('id-ID', { hour12: false });
-  } else {
+  } else if (lastSeenEl) {
     lastSeenEl.textContent = '--';
   }
 
-  // Current Health - Status / Latency / Packet Loss / Uptime only.
-  // CPU & Memory moved to System Resources (single source of truth).
+  // Current Health — status/latency/loss (Uptime dipindah ke System Resources
+  // agar tidak tampil dua kali).
   setStatusPill('detail-health-status', data.device.status);
   document.getElementById('detail-health-latency').textContent = latencySummary.avg ? `${latencySummary.avg} ms` : '--';
   document.getElementById('detail-health-loss').textContent = lossSummary.avg ? `${lossSummary.avg}%` : '--';
-  document.getElementById('detail-health-uptime').textContent = sys.sys_uptime_human || '--';
 
   // Updated timestamp
   const updatedAt = document.getElementById('detail-updated-at');
@@ -963,66 +983,9 @@ function renderDeviceDetail(data, isRefresh = false) {
     qualityUpdated.textContent = data.generated_at ? `Updated ${formatTimeAgo(new Date(data.generated_at))}` : '--';
   }
 
-  // System Resources section
-  const sysCpuEl = document.getElementById('detail-sys-cpu');
-  const sysCpuBar = document.getElementById('detail-sys-cpu-bar');
-  if (sysCpuEl && sys.cpu_load_pct !== null && sys.cpu_load_pct !== undefined) {
-    const cpuVal = parseFloat(sys.cpu_load_pct).toFixed(1);
-    sysCpuEl.textContent = `${cpuVal}%`;
-    if (sysCpuBar) sysCpuBar.style.width = `${cpuVal}%`;
-  } else if (sysCpuEl) {
-    sysCpuEl.textContent = '--';
-    if (sysCpuBar) sysCpuBar.style.width = '0%';
-  }
-
-  const sysMemEl = document.getElementById('detail-sys-memory');
-  const sysMemBar = document.getElementById('detail-sys-memory-bar');
-  if (sysMemEl && sys.storage_entries && sys.storage_entries.length > 0) {
-    const usage = decodeStorageUsage(findRamEntry(sys.storage_entries));
-    if (usage) {
-      sysMemEl.textContent = `${usage.usedGB} / ${usage.totalGB} GB (${usage.pct}%)`;
-      if (sysMemBar) sysMemBar.style.width = `${usage.pct}%`;
-    } else {
-      sysMemEl.textContent = '--';
-      if (sysMemBar) sysMemBar.style.width = '0%';
-    }
-  } else if (sysMemEl) {
-    sysMemEl.textContent = '--';
-    if (sysMemBar) sysMemBar.style.width = '0%';
-  }
-
-  const sysStorEl = document.getElementById('detail-sys-storage');
-  const sysStorBar = document.getElementById('detail-sys-storage-bar');
-  if (sysStorEl && sys.storage_entries && sys.storage_entries.length > 0) {
-    const ram = findRamEntry(sys.storage_entries);
-    const storageEntry = (sys.storage_entries || []).find(e => e !== ram);
-    const usage = decodeStorageUsage(storageEntry);
-    if (usage) {
-      sysStorEl.textContent = `${usage.usedGB} / ${usage.totalGB} GB (${usage.pct}%)`;
-      if (sysStorBar) sysStorBar.style.width = `${usage.pct}%`;
-    } else {
-      sysStorEl.textContent = '--';
-      if (sysStorBar) sysStorBar.style.width = '0%';
-    }
-  } else if (sysStorEl) {
-    sysStorEl.textContent = '--';
-    if (sysStorBar) sysStorBar.style.width = '0%';
-  }
-
-  // Temperature: no runtime source exists yet in the deep-dive payload —
-  // keep the row visible with a placeholder instead of faking a value.
-  const sysTempEl = document.getElementById('detail-sys-temp');
-  const sysTempBar = document.getElementById('detail-sys-temp-bar');
-  const tempVal = sys.temperature_c != null ? sys.temperature_c : (sys.temperature != null ? sys.temperature : null);
-  if (sysTempEl) {
-    if (tempVal != null) {
-      sysTempEl.textContent = `${Number(tempVal).toFixed(1)}°C`;
-      if (sysTempBar) sysTempBar.style.width = `${Math.min(Math.max(Number(tempVal), 0), 100)}%`;
-    } else {
-      sysTempEl.textContent = '--';
-      if (sysTempBar) sysTempBar.style.width = '0%';
-    }
-  }
+  // System Resources — render dinamis dari struktur per-metrik
+  // (vendor-agnostic; nilai/sumber/status datang dari deep-dive).
+  renderSystemResources(sys);
 
   // Traffic freshness
   const trafficFreshness = document.getElementById('detail-traffic-freshness');
@@ -1037,8 +1000,9 @@ function renderDeviceDetail(data, isRefresh = false) {
   // Interface selector for throughput chart
   populateDetailIfaceSelect(data);
 
-  // Charts (init if not yet, otherwise just update)
-  if (!isRefresh) {
+  // Charts: init only if not yet created — openDeviceDetail already initializes
+  // them so live ticks paint before the first deep-dive response arrives.
+  if (!state.charts.detailThroughput) {
     initDetailCharts();
   }
   updateDetailCharts(data);
@@ -1053,54 +1017,291 @@ function renderDeviceDetail(data, isRefresh = false) {
   loadDeviceHistory(data.device.id);
 }
 
-function findRamEntry(storageEntries) {
-  let primary = storageEntries.find(e =>
-    (e.descr || '').trim().toLowerCase() === 'physical memory'
-  );
-  if (!primary) {
-    const alt = storageEntries.find(e => {
-      const d = (e.descr || '').trim().toLowerCase();
-      return d === 'main memory' || d === 'ram' || d === 'real memory' || d === 'system memory';
-    });
-    primary = alt;
-  }
-  if (!primary) {
-    const OID_RAM = '.1.3.6.1.2.1.25.2.1.2';
-    const OID_FIXED = '.1.3.6.1.2.1.25.2.1.4';
-    primary = storageEntries.find(e => e.storage_type === OID_RAM);
-    if (!primary) primary = storageEntries.find(e => e.storage_type === OID_FIXED);
-    if (!primary) primary = storageEntries[0];
-    for (const e of storageEntries) {
-      if ((e.size || 0) > (primary.size || 0)) primary = e;
-    }
-  }
-  return primary;
+/* ============================================================
+   SYSTEM RESOURCES — render dinamis per-metrik (vendor-agnostic).
+   Nilai berasal dari struktur baru deep-dive:
+   { supported, value, source, reason } + memory/storage bytes.
+   Metrik yang tidak didukung perangkat ditampilkan + alasannya,
+   BUKAN tanda '-' tanpa penjelasan.
+   ============================================================ */
+function fmtBytes(n) {
+  if (n == null || !isFinite(n) || n < 0) return '--';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
-/**
- * Decode an hrStorage entry into a sane { usedGB, totalGB, pct }.
- * RouterOS (and some SNMP agents) report hrStorageUsed > hrStorageSize,
- * with the real total carried in "used" and the free space in "size".
- * When that happens the fields are swapped so the math stays sane.
- */
-function decodeStorageUsage(entry) {
-  if (!entry) return null;
-  const allocUnits = entry.alloc_units && entry.alloc_units > 0 ? entry.alloc_units : 4096;
-  let totalUnits = entry.size || 0;
-  let usedUnits = entry.used || 0;
-  if (usedUnits > totalUnits && totalUnits > 0) {
-    const freeUnits = totalUnits;
-    totalUnits = usedUnits;
-    usedUnits = Math.max(totalUnits - freeUnits, 0);
+function sysBarPctColor(pct) {
+  return pct >= 90 ? 'var(--color-offline)' : (pct >= 75 ? 'var(--color-warning)' : 'var(--color-brand)');
+}
+
+function sysRowBar(label, valueText, pct, source) {
+  const src = source ? ` <small>(${escapeHtml(source)})</small>` : '';
+  const bar = (pct != null && isFinite(pct))
+    ? `<div class="dic-sys-bar-wrap" title="${escapeHtml(label)}"><span class="dic-sys-bar" style="width:${Math.min(Math.max(pct, 0), 100).toFixed(1)}%; background:${sysBarPctColor(pct)};"></span></div>`
+    : '<div class="dic-sys-bar-wrap"></div>';
+  return `<div class="dic-sys-row"><span class="dic-sys-label">${escapeHtml(label)}${src}</span>${bar}<span class="dic-sys-value">${valueText}</span></div>`;
+}
+
+function sysRowStatus(label, reason) {
+  return `<div class="dic-sys-row"><span class="dic-sys-label">${escapeHtml(label)}</span><span class="dic-sys-value dic-sys-status">${escapeHtml(reason || 'Data tidak tersedia dari perangkat')}</span></div>`;
+}
+
+function renderSystemResources(sys) {
+  const list = document.getElementById('detail-sys-list');
+  const srcBadge = document.getElementById('detail-sys-source');
+  const updatedEl = document.getElementById('detail-sys-updated');
+  if (srcBadge) srcBadge.textContent = `sumber: ${sys && sys.source ? sys.source : '--'}`;
+  if (updatedEl && sys && sys.updated_at) updatedEl.textContent = `updated ${formatTimeAgo(new Date(sys.updated_at))}`;
+  if (!list) return;
+  if (!sys || !sys.has_data) {
+    list.innerHTML = '<div class="dic-empty-state">Belum ada data system resource — data terisi otomatis dari SNMP/telegraf saat perangkat merespons.</div>';
+    return;
   }
-  const totalBytes = totalUnits * allocUnits;
-  if (totalBytes <= 0) return null;
-  const usedBytes = Math.min(usedUnits * allocUnits, totalBytes);
-  return {
-    usedGB: (usedBytes / (1024 ** 3)).toFixed(2),
-    totalGB: (totalBytes / (1024 ** 3)).toFixed(2),
-    pct: ((usedBytes / totalBytes) * 100).toFixed(1)
-  };
+  const rows = [];
+
+  if (sys.uptime && sys.uptime.supported) {
+    rows.push(sysRowBar('Uptime', `${escapeHtml(sys.sys_uptime_human || '--')}`, null, sys.uptime.source));
+  } else {
+    rows.push(sysRowStatus('Uptime', sys.uptime && sys.uptime.reason));
+  }
+
+  if (sys.cpu_load_pct && sys.cpu_load_pct.supported) {
+    const v = parseFloat(sys.cpu_load_pct.value);
+    rows.push(sysRowBar('CPU Load', `${isFinite(v) ? v.toFixed(1) : '--'}%`, v, sys.cpu_load_pct.source));
+  } else {
+    rows.push(sysRowStatus('CPU Load', sys.cpu_load_pct && sys.cpu_load_pct.reason));
+  }
+
+  if (sys.memory && sys.memory.supported) {
+    const pct = parseFloat(sys.memory.pct);
+    rows.push(sysRowBar('Memory', `${fmtBytes(sys.memory.used_bytes)} / ${fmtBytes(sys.memory.total_bytes)} (${isFinite(pct) ? pct.toFixed(1) : '--'}%)`, pct, sys.memory.source));
+  } else {
+    rows.push(sysRowStatus('Memory', sys.memory && sys.memory.reason));
+  }
+
+  if (sys.storage && sys.storage.supported && Array.isArray(sys.storage.entries) && sys.storage.entries.length > 0) {
+    const nonRam = sys.storage.entries.filter(e => e && e.total_bytes > 0 &&
+      !((e.storage_type === '.1.3.6.1.2.1.25.2.1.2') || /(main memory|physical memory|\bram\b)/i.test(e.descr || '')));
+    if (nonRam.length > 0) {
+      nonRam.forEach(e => {
+        const pct = (e.used_bytes / e.total_bytes) * 100;
+        rows.push(sysRowBar(`Storage — ${e.descr || 'disk'}`, `${fmtBytes(e.used_bytes)} / ${fmtBytes(e.total_bytes)} (${pct.toFixed(1)}%)`, pct, sys.storage.source));
+      });
+    } else {
+      rows.push(sysRowStatus('Storage', 'Tidak ada volume storage non-RAM yang dilaporkan'));
+    }
+  } else {
+    rows.push(sysRowStatus('Storage', sys.storage && sys.storage.reason));
+  }
+
+  if (sys.temperature_c && sys.temperature_c.supported && sys.temperature_c.value != null) {
+    const v = parseFloat(sys.temperature_c.value);
+    rows.push(sysRowBar('Temperature', `${isFinite(v) ? v.toFixed(1) : '--'}°C`, (v - 30) / 40 * 100, sys.temperature_c.source));
+  } else {
+    rows.push(sysRowStatus('Temperature', sys.temperature_c && sys.temperature_c.reason));
+  }
+
+  if (sys.battery && sys.battery.supported) {
+    const charge = sys.battery.charge_pct != null ? `${Number(sys.battery.charge_pct).toFixed(0)}%` : 'ok';
+    rows.push(sysRowBar('Battery/UPS', charge, Number(sys.battery.charge_pct) || null, sys.battery.source));
+  } else {
+    rows.push(sysRowStatus('Battery / UPS', sys.battery && sys.battery.reason));
+  }
+
+  list.innerHTML = rows.length > 0
+    ? rows.join('')
+    : '<div class="dic-empty-state">Tidak ada metrik yang didukung perangkat ini.</div>';
+}
+
+/* ============================================================
+   DEVICE LOG — audit trail normalized (syslog/SNMP trap).
+   Realtime via WS DEVICE_LOG + polling 10s; raw tidak pernah hilang.
+   ============================================================ */
+let detailLogPollTimer = null;
+let detailLogSevFilter = 'all';
+let detailLogMode = 'normalized'; // 'normalized' | 'raw'
+let deviceLogCache = []; // hasil fetch terakhir, dipakai toggle mode/filter tanpa fetch ulang
+const LOG_SEV_RANK = { debug: 0, info: 1, notice: 2, warning: 3, error: 4, critical: 5, alert: 6, emergency: 7 };
+
+function logVisible(l) {
+  if (detailLogSevFilter === 'all') return true;
+  const min = LOG_SEV_RANK[detailLogSevFilter] != null ? LOG_SEV_RANK[detailLogSevFilter] : 0;
+  return (LOG_SEV_RANK[l.severity] != null ? LOG_SEV_RANK[l.severity] : 1) >= min;
+}
+
+const MONTHS_I = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+/**
+ * Jam perangkat dari header RFC3164 di raw (mis. "<134>Sep  9 01:24:56 ...")
+ * — dipakai bila device_timestamp belum tersimpan (baris lama) agar tampilan
+ * konsisten dgn /log print. Tahun diinfer dari jam server lokal.
+ */
+function rawDeviceIso(raw) {
+  if (!raw) return null;
+  const m = String(raw).match(/^<\d+>\s*([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const mon = MONTHS_I[m[1].toLowerCase()];
+  if (!mon) return null;
+  const year = new Date().getFullYear();
+  const d = new Date(year, mon - 1, parseInt(m[2], 10), parseInt(m[3], 10), parseInt(m[4], 10), parseInt(m[5], 10));
+  if (d.getTime() - Date.now() > 24 * 3600 * 1000) d.setFullYear(year - 1);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+/** Waktu: jam perangkat didahulukan (device_timestamp / header raw), fallback jam server. */
+function logTime(l) {
+  const devIso = l.deviceTimestamp || rawDeviceIso(l.rawMessage);
+  const useDevice = !!devIso;
+  const raw = useDevice ? devIso : l.receivedAt;
+  const d = raw ? new Date(raw) : null;
+  if (!d || isNaN(d.getTime())) return { label: '--', device: false };
+  const date = d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short' });
+  const time = d.toLocaleTimeString('id-ID', { hour12: false });
+  return { label: `${date} ${time}`, device: useDevice };
+}
+
+/** Severity tampilan: utamakan stored; baris lama (pra-parser topics) yang masih
+ *  'info' padahal raw berisi topics error/critical → derive dari raw utk badge. */
+function displaySeverity(l) {
+  const stored = l.severity || 'info';
+  const raw = l.rawMessage || '';
+  try {
+    let body = String(raw).replace(/^<\d+>/, '').trim();
+    const tokens = body.split(/\s+/).slice(0, 7);
+    // Buang header tanggal (RFC3164 3 token / ISO 1 token).
+    if (/^[A-Z][a-z]{2}$/.test(tokens[0] || '') && /^\d{1,2}$/.test(tokens[1] || '') && /^\d{2}:\d{2}:\d{2}$/.test(tokens[2] || '')) tokens.splice(0, 3);
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(tokens[0] || '')) tokens.shift();
+    const topicTok = tokens.map(t => t.replace(/[^a-z0-9,]/gi, '')).find(t => /^[a-z][a-z0-9]*(?:,[a-z][a-z0-9]*)+$/.test(t || ''));
+    if (topicTok) {
+      // Pilih level paling parah di topics (emergency 7 > critical 5 > error 4 ...).
+      let topicRank = -1;
+      let topicSev = null;
+      for (const t of topicTok.split(',')) {
+        const r = LOG_SEV_RANK[t];
+        if (r != null && r > topicRank) { topicRank = r; topicSev = t; }
+      }
+      const storedRank = LOG_SEV_RANK[stored] != null ? LOG_SEV_RANK[stored] : 1;
+      if (topicRank > storedRank) return topicSev;
+    }
+  } catch (e) { /* fallback stored */ }
+  return stored;
+}
+
+/** Mode Normalized: kolom waktu/severity/program/pesan + klik utk lihat raw asli. */
+function logRowHtml(l) {
+  const t = logTime(l);
+  const sev = displaySeverity(l);
+  const sevCls = 'sev-' + sev;
+  const sevTxt = sev.toUpperCase();
+  const corr = l.correlatedEventType
+    ? `<span class="corr" title="Log ini dikorelasikan menjadi event">→ ${escapeHtml(l.correlatedEventType)}</span>`
+    : '';
+  const rawBlock = (l.rawMessage && l.rawMessage !== l.message)
+    ? `<div class="dic-log-raw" hidden>${escapeHtml(l.rawMessage)}</div>`
+    : '';
+  return `<div class="dic-log-item" data-sev="${escapeHtml(sev)}" title="${t.device ? 'Jam perangkat' : 'Jam server (diterima)'} · klik utk lihat raw">
+    <span class="t">${t.label}</span>
+    <span class="sev ${sevCls}">${sevTxt}</span>
+    <span class="prog">${escapeHtml(l.program || 'system')}</span>
+    <span class="msg" title="${escapeHtml(l.message || '')}">${escapeHtml(l.message || '')}</span>
+    ${corr}${rawBlock}
+  </div>`;
+}
+
+/** Mode Raw: garis asli persis seperti dikirim perangkat (tanpa kehilangan info). */
+function logRawRowHtml(l) {
+  const t = logTime(l);
+  const sev = displaySeverity(l);
+  const sevCls = 'sev-' + sev;
+  const sevTxt = sev.toUpperCase();
+  const raw = l.rawMessage || l.message || '';
+  const prefix = `[${escapeHtml(l.sourceType || 'syslog')}${l.transport ? '/' + escapeHtml(l.transport) : ''}]`;
+  return `<div class="dic-log-item dic-log-raw-mode" data-sev="${escapeHtml(sev)}">
+    <span class="t" title="${t.device ? 'Jam perangkat' : 'Jam server (diterima)'}">${t.label}</span>
+    <span class="sev ${sevCls}">${sevTxt}</span>
+    <span class="rawtext"><span class="srcbadge">${prefix}</span>${escapeHtml(raw)}</span>
+  </div>`;
+}
+
+/** Render ulang dari cache sesuai filter severity + mode aktif. */
+function renderLogList() {
+  const listEl = document.getElementById('detail-log-list');
+  const countEl = document.getElementById('detail-log-count');
+  const hintEl = document.getElementById('detail-log-hint');
+  if (!listEl) return;
+  const visible = deviceLogCache.filter(logVisible);
+  if (countEl) countEl.textContent = String(visible.length);
+  if (visible.length === 0) {
+    listEl.innerHTML = '<div class="dic-empty-state">Belum ada device log.</div>';
+    if (hintEl) {
+      hintEl.textContent = 'Aktifkan remote syslog di MikroTik: /system logging add action=remote remote=<IP_BMS> port=5514 topics=all. Pastikan firewall mengizinkan UDP/TCP 5514 dari device. SNMP trap: set SNMP_TRAP_ENABLED=true dan binary snmptrapd tersedia.';
+    }
+    return;
+  }
+  const isRaw = detailLogMode === 'raw';
+  listEl.innerHTML = visible.map(isRaw ? logRawRowHtml : logRowHtml).join('');
+  if (hintEl) {
+    hintEl.textContent = isRaw
+      ? 'Tampilan Raw = garis asli persis seperti dikirim device. Kolom waktu = jam perangkat (dari header log/device_timestamp).'
+      : 'Waktu = jam perangkat (bila tersedia). Klik baris untuk melihat raw asli.';
+  }
+  if (!isRaw) {
+    // Klik baris normalized → expand/sembunyikan raw asli.
+    listEl.querySelectorAll('.dic-log-item').forEach(row => {
+      row.addEventListener('click', () => {
+        const raw = row.querySelector('.dic-log-raw');
+        if (raw) raw.hidden = !raw.hidden;
+      });
+    });
+  }
+}
+
+function renderDeviceLogs(logs) {
+  deviceLogCache = logs || [];
+  renderLogList();
+}
+
+async function loadDeviceLogs(deviceId, incremental) {
+  try {
+    const res = await fetch(`/api/devices/${deviceId}/logs?limit=200`).then(r => r.json());
+    if (res && res.success) {
+      deviceLogCache = res.logs || [];
+      renderLogList();
+      const live = document.getElementById('detail-log-live');
+      if (live) {
+        live.className = 'dic-live-dot live';
+        live.title = 'Realtime stream aktif';
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load device logs:', e);
+  }
+}
+
+function startDeviceLogPolling(deviceId) {
+  stopDeviceLogPolling();
+  loadDeviceLogs(deviceId, false);
+  detailLogPollTimer = setInterval(() => loadDeviceLogs(deviceId, true), 10000);
+}
+
+function stopDeviceLogPolling() {
+  if (detailLogPollTimer) {
+    clearInterval(detailLogPollTimer);
+    detailLogPollTimer = null;
+  }
+}
+
+/** Log realtime (WS DEVICE_LOG) → cache + render sesuai mode aktif. */
+function onWsDeviceLog(log) {
+  if (!isDetailOpen()) return;
+  if (!log || state.detailDeviceId == null || log.deviceId !== state.detailDeviceId) return;
+  if (deviceLogCache.some(x => x.id === log.id)) return;
+  deviceLogCache.unshift(log);
+  if (deviceLogCache.length > 500) deviceLogCache.pop();
+  renderLogList();
 }
 
 async function loadDeviceEvents(deviceId) {
@@ -1366,10 +1567,14 @@ function populateDetailIfaceSelect(data) {
     if (wired) sel.value = wired;
   }
 
-  // Keep the WebSocket stream in sync with the interface shown in the panel
+  // Keep the WebSocket stream in sync with the interface shown in the panel.
+  // Clearing the shared window prevents two interfaces ever mixing in the
+  // chart when the automatic "first wired interface" differs from the stream.
   if (sel.value && isDetailOpen() && state.selectedInterface !== sel.value) {
     state.selectedInterface = sel.value;
+    resetTrafficBuffer();
     subscribeSelectedStream();
+    trafficPollTick();
   }
 }
 
@@ -1542,6 +1747,7 @@ function ensureStreamSelection() {
 
 function resetTrafficBuffer() {
   state.chartBuffer = { labels: [], inData: [], outData: [] };
+  state.lastTrafficTickAt = 0; // mark WS stale so the next poll reseeds history
   rebindTrafficCharts();
 }
 
@@ -2511,6 +2717,17 @@ function setupEventListeners() {
   document.getElementById('btn-device-detail-close')?.addEventListener('click', closeDeviceDetail);
   document.getElementById('btn-device-detail-x')?.addEventListener('click', closeDeviceDetail);
 
+  // Device Log: filter severity + mode (Normalized/Raw) → re-render dari cache.
+  document.getElementById('detail-log-sev')?.addEventListener('change', (e) => {
+    detailLogSevFilter = e.target ? e.target.value : 'all';
+    if (deviceLogCache.length > 0) renderLogList();
+    else if (state.detailDeviceId != null) loadDeviceLogs(state.detailDeviceId, false);
+  });
+  document.getElementById('detail-log-mode')?.addEventListener('change', (e) => {
+    detailLogMode = (e.target && e.target.value === 'raw') ? 'raw' : 'normalized';
+    renderLogList();
+  });
+
   // Detail interface selector → re-point the WS stream to the new interface.
   // The shared buffer is cleared so data from the previous interface never
   // mixes with the new one; the first live tick repaints it (~1s).
@@ -2526,6 +2743,7 @@ function setupEventListeners() {
     }
     resetTrafficBuffer();
     subscribeSelectedStream();
+    trafficPollTick(); // seed 5m history for the new interface right away
     if (state.detailData) updateDetailCharts(state.detailData);
   });
 
@@ -3485,7 +3703,7 @@ async function loadReportsData() {
       if (!res.daily_breakdown || res.daily_breakdown.length === 0) {
         tableEl.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Belum ada riwayat harian. Riwayat terisi otomatis dari data ping InfluxDB setelah Telegraf berjalan minimal 1 hari.</div>';
       } else {
-        const rows = res.daily_breakdown.map(d => {
+        const rows = res.daily_breakdown.slice().reverse().map(d => {
           const dt = new Date(d.date);
           const dateLabel = dt.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
           const pct = parseFloat(d.uptime_percentage);

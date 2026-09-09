@@ -433,57 +433,107 @@ async function getInterfaceThroughputRates(deviceId, minutes = 5) {
 async function getSystemMetrics(deviceId) {
   const { queryApi, bucket } = getClient();
   const devIdStr = String(deviceId);
+
+  // Telegraf dapat menulis system metrics ke beberapa bentuk, tergantung
+  // konfigurasi yang digenerate (name_override per-input vs name per-tabel):
+  //   1) measurement "system" (saat name_override dipakai) dgn field
+  //      uptime_ticks / cpu_load_pct / storage_* (label tertukar) DAN field
+  //      asli hrStorageUsed / hrStorageSize / hrStorageAllocationUnits.
+  //   2) measurement "system_cpu" / "system_storage" (konfigurasi lebih lama).
+  // Parser ini toleran terhadap SEMUA bentuk; label storage dinormalisasi ke
+  // semantik benar { size = kapasitas, used = terpakai, alloc_units }.
   const fluxQuery = `
     from(bucket: "${bucket}")
       |> range(start: -5m)
       |> filter(fn: (r) => r["device_id"] == "${devIdStr}")
       |> filter(fn: (r) => r["_measurement"] == "system"
                        or r["_measurement"] == "system_cpu"
-                       or r["_measurement"] == "system_storage"
-                       or r["_measurement"] == "net_interface")
+                       or r["_measurement"] == "system_storage")
       |> last()
   `;
 
-  const result = { has_data: false, sys_uptime_ticks: null, cpu_load_pct: null, memory_used: null, memory_total: null, storage_entries: [] };
+  const result = { has_data: false, sys_uptime_ticks: null, cpu_load_pct: null, memory_used: null, memory_total: null, storage_entries: [], fetched_at: null };
+  const byType = new Map();
+  const entryFor = (storageType) => {
+    if (!storageType) return null;
+    if (!byType.has(storageType)) {
+      const e = { storage_type: storageType, descr: '', alloc_units: 0, size: 0, used: 0 };
+      byType.set(storageType, e);
+      result.storage_entries.push(e);
+    }
+    return byType.get(storageType);
+  };
   try {
     await new Promise((resolve) => {
       queryApi.queryRows(fluxQuery, {
         next: (row, tableMeta) => {
           const o = tableMeta.toObject(row);
-          result.has_data = true;
-          if (o._measurement === 'system' && o._field === 'uptime_ticks') {
+          if (o._measurement === 'system' || o._measurement === 'system_cpu' || o._measurement === 'system_storage') {
+            result.has_data = true;
+            if (!result.fetched_at) result.fetched_at = o._time;
+          }
+          if (o._field === 'uptime_ticks') {
             result.sys_uptime_ticks = parseInt(o._value, 10) || 0;
           }
-          if (o._measurement === 'system_cpu' && o._field === 'cpu_load_pct') {
+          if (o._field === 'cpu_load_pct') {
             result.cpu_load_pct = parseFloat(o._value) || 0;
           }
-          if (o._measurement === 'system_storage') {
-            if (o._field === 'storage_descr') {
-              const existing = result.storage_entries.find(e => e.storage_type === o.storage_type);
-              if (existing) existing.descr = String(o._value || '');
-              else result.storage_entries.push({ storage_type: o.storage_type, descr: String(o._value || ''), used: 0, size: 0, alloc_units: 0 });
-            }
-            if (o._field === 'storage_alloc_units') {
-              const existing = result.storage_entries.find(e => e.storage_type === o.storage_type);
-              if (existing) existing.alloc_units = parseInt(o._value, 10) || 0;
-              else result.storage_entries.push({ storage_type: o.storage_type, descr: '', used: 0, size: 0, alloc_units: parseInt(o._value, 10) || 0 });
-            }
-            if (o._field === 'storage_used') {
-              const existing = result.storage_entries.find(e => e.storage_type === o.storage_type);
-              if (existing) existing.used = parseFloat(o._value) || 0;
-              else result.storage_entries.push({ storage_type: o.storage_type, descr: '', used: parseFloat(o._value) || 0, size: 0, alloc_units: 0 });
-            }
-            if (o._field === 'storage_size') {
-              const existing = result.storage_entries.find(e => e.storage_type === o.storage_type);
-              if (existing) existing.size = parseFloat(o._value) || 0;
-              else result.storage_entries.push({ storage_type: o.storage_type, descr: '', used: 0, size: parseFloat(o._value) || 0, alloc_units: 0 });
-            }
+          // --- Storage: normalisasi ke { size, used, alloc_units } ---
+          if (o._field === 'storage_alloc_units' || o._field === 'hrStorageAllocationUnits') {
+            const e = entryFor(o.storage_type);
+            if (e) e.alloc_units = parseInt(o._value, 10) || 0;
+          }
+          if (o._field === 'hrStorageSize') {
+            const e = entryFor(o.storage_type);
+            if (e) e.size = parseFloat(o._value) || 0;
+          }
+          if (o._field === 'hrStorageUsed') {
+            const e = entryFor(o.storage_type);
+            if (e) e.used = parseFloat(o._value) || 0;
+          }
+          // Telegraf lama menukar label: storage_used = hrStorageSize (kapasitas),
+          // storage_size = hrStorageUsed (terpakai) → kembalikan ke semantik benar.
+          if (o._field === 'storage_used') {
+            const e = entryFor(o.storage_type);
+            if (e && !e.size) e.size = parseFloat(o._value) || 0;
+          }
+          if (o._field === 'storage_size') {
+            const e = entryFor(o.storage_type);
+            if (e && !e.used) e.used = parseFloat(o._value) || 0;
+          }
+          if (o._field === 'hrStorageDescr') {
+            const e = entryFor(o.storage_type);
+            if (e) e.descr = String(o._value || '');
+          }
+          if (o._field === 'storage_descr') {
+            const e = entryFor(o.storage_type);
+            if (e) e.descr = String(o._value || e.descr || '');
+          }
+          // storage_descr ditulis telegraf sebagai TAG (bukan field) —
+          // tetap dibaca lewat kolom tag row.
+          if (o.storage_type && o.storage_descr) {
+            const e = entryFor(o.storage_type);
+            if (e && !e.descr) e.descr = String(o.storage_descr);
           }
         },
         error: () => resolve(),
         complete: () => resolve()
       });
     });
+
+    // Memory dari entri hrStorage bertipe RAM (hrStorageRam .1.3.6.1.2.1.25.2.1.2
+    // atau deskripsi umum). Bytes = jumlah unit × alloc_units.
+    const RAM_TYPE = '.1.3.6.1.2.1.25.2.1.2';
+    const ramEntry = result.storage_entries.find(e => {
+      const d = (e.descr || '').trim().toLowerCase();
+      return e.storage_type === RAM_TYPE ||
+        d === 'physical memory' || d === 'main memory' || d === 'ram' ||
+        d === 'real memory' || d === 'system memory';
+    });
+    if (ramEntry && ramEntry.alloc_units > 0) {
+      result.memory_total = (ramEntry.size || 0) * ramEntry.alloc_units;
+      result.memory_used = (ramEntry.used || 0) * ramEntry.alloc_units;
+    }
   } catch (err) {
     console.error('[InfluxService] getSystemMetrics error:', err.message);
   }

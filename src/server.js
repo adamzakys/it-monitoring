@@ -8,7 +8,8 @@ const db = require('./db');
 const apiRoutes = require('./routes/api');
 const telegrafManager = require('./services/telegrafManager');
 const topologyDiscovery = require('./services/topologyDiscovery');
-const { initStreamService } = require('./services/streamService');
+const { initStreamService, broadcastToDevice } = require('./services/streamService');
+const logCollectorModule = require('./services/logCollector');
 
 const app = express();
 const server = http.createServer(app);
@@ -66,6 +67,21 @@ async function bootstrap() {
 
   // 2. Initialize WebSocket Real-Time Streaming (1s interval)
   initStreamService(server);
+
+  // 2a. Log Collector (Syslog UDP/TCP + SNMP Trap opsional) — pipeline log
+  // terpisah dari pipeline metrik SNMP; raw log = audit trail, korelasi → Event.
+  try {
+    const collector = await logCollectorModule.initLogCollector({
+      broadcast: broadcastToDevice
+    });
+    const sysStatus = collector.syslog.started
+      ? `Syslog UDP+TCP :${collector.syslog.port} AKTIF`
+      : `Syslog gagal bind (${(collector.syslog.failures || []).join(',') || 'unknown'})`;
+    const trap = collector.snmpTrap;
+    console.log(`[LogCollector] ${sysStatus} | SNMP Trap: ${trap ? (trap.started ? `AKTIF (${trap.status})` : `${trap.status} — ${trap.reason || ''}`) : 'nonaktif'} | Retensi ${collector.retentionDays} hari`);
+  } catch (e) {
+    console.warn('[LogCollector] init error (lanjut tanpa log collector):', e.message);
+  }
 
   // 2b. Initialize Topology Discovery (LLDP/CDP periodic)
   try {

@@ -45,9 +45,22 @@ function initStreamService(server) {
     });
   });
 
-  // Start 1-second high-resolution ticker
+  // 1-second real-time ticker, self-rescheduling: next tick fires ~1s after
+  // the previous run finishes (never overlaps, no queued back-to-back bursts
+  // when a cycle takes longer than 1s), so every subscriber gets a tick each
+  // cycle instead of waiting multiple cycles.
   if (!intervalId) {
-    intervalId = setInterval(runTick, 1000);
+    const tickLoop = async () => {
+      const t0 = Date.now();
+      try {
+        await runTick();
+      } catch (e) {
+        console.warn('[StreamService] tick error:', e.message);
+      }
+      const delay = Math.max(250, 1000 - (Date.now() - t0));
+      intervalId = setTimeout(tickLoop, delay);
+    };
+    intervalId = setTimeout(tickLoop, 1000);
     console.log('[StreamService] 1-second real-time streaming engine started.');
   }
 }
@@ -104,25 +117,31 @@ async function runTick() {
     devices = db.getMemoryStore().devices;
   }
 
-  // 1. Evaluate metrics and health for ALL devices in parallel
+  // 1. Evaluate metrics and health for ALL devices, in bounded-parallel chunks
+  // (per-device work can block on InfluxDB/ICMP/SNMP; sequential awaits would
+  // stretch one cycle far beyond 1s once devices fall back to realtime probes).
   const deviceMetrics = new Map();
 
-  for (const dev of devices) {
-    const defaultIface = dev.device_type === 'router' ? 'ether1' : 'enp0s3';
-    const metric = await generateOrFetchMetrics(dev, defaultIface);
+  const defaultIfaceFor = (dev) => dev.device_type === 'router' ? 'ether1' : 'enp0s3';
+  const CHUNK = 5;
+  for (let i = 0; i < devices.length; i += CHUNK) {
+    await Promise.all(devices.slice(i, i + CHUNK).map(async (dev) => {
+      const metric = await generateOrFetchMetrics(dev, defaultIfaceFor(dev));
 
-    // Evaluate health & trigger alerts if state changes
-    const computedStatus = await evaluateDeviceHealth(dev, metric);
-    metric.status = computedStatus;
+      // Evaluate health & trigger alerts if state changes
+      const computedStatus = await evaluateDeviceHealth(dev, metric);
+      metric.status = computedStatus;
 
-    // Always sync ping_latency/packet_loss ke DB agar UI/kpi tidak stale
-    // (tidak menyentuh status — sudah di-handle evaluateDeviceHealth)
-    await updateDeviceMetricsInDb(dev.id, metric.latency, metric.packetLoss);
+      // Always sync ping_latency/packet_loss ke DB agar UI/kpi tidak stale
+      // (tidak menyentuh status — sudah di-handle evaluateDeviceHealth)
+      await updateDeviceMetricsInDb(dev.id, metric.latency, metric.packetLoss);
 
-    deviceMetrics.set(dev.id, metric);
+      deviceMetrics.set(dev.id, metric);
+    }));
   }
 
   // 2. Broadcast updates to all connected clients
+  const ifaceCycleCache = new Map(); // deviceId:ifaceName -> metric (one SNMP walk per cycle max)
   for (const client of wss.clients) {
     if (client.readyState !== client.OPEN) continue;
 
@@ -131,10 +150,17 @@ async function runTick() {
 
     if (!targetDevice) continue;
 
-    // Fetch metric specific to client's selected interface
+    // Fetch metric specific to client's selected interface; cache per cycle so
+    // multiple clients / repeated ticks never trigger duplicate SNMP walks.
     let subMetric = deviceMetrics.get(targetDevice.id);
-    if (sub.interfaceName && sub.interfaceName !== (targetDevice.device_type === 'router' ? 'ether1' : 'enp0s3')) {
-      subMetric = await generateOrFetchMetrics(targetDevice, sub.interfaceName);
+    const reqIface = sub.interfaceName || defaultIfaceFor(targetDevice);
+    if (reqIface !== defaultIfaceFor(targetDevice)) {
+      const cacheKey = `${targetDevice.id}:${reqIface}`;
+      subMetric = ifaceCycleCache.get(cacheKey);
+      if (!subMetric) {
+        subMetric = await generateOrFetchMetrics(targetDevice, reqIface);
+        ifaceCycleCache.set(cacheKey, subMetric);
+      }
       subMetric.status = deviceMetrics.get(targetDevice.id)?.status || targetDevice.status;
     }
 
@@ -310,10 +336,15 @@ async function realTimeSnmpPoll(device) {
 }
 
 /**
- * Real-time system metrics via direct SNMP walk.
- * Returns { sys_uptime_ticks, cpu_load_pct, has_data }.
- * Uses sysUpTime.0 (.1.3.6.1.2.1.1.3.0) and hrProcessorLoad (.1.3.6.1.2.1.25.3.3.1.2).
- * Phase 1: uses spawn() with arg arrays and validates user-derived fields.
+ * Real-time system metrics via direct SNMP (HOST-RESOURCES-MIB + sysUpTime).
+ * Vendor-agnostic: generic HR works for Linux servers AND RouterOS ≥ 6.4x/7.x
+ * (divalidasi runtime: device 18 CHR ROS 7.16 merespons hrProcessor/hrStorage).
+ * Returns { has_data, sys_uptime_ticks, cpu_load_pct, memory_total_bytes,
+ *           memory_used_bytes, storage_entries[], temperature_c, fetched_at }.
+ * storage_entries: { storage_type, descr, alloc_units, size, used } — size/used
+ * dalam satuan alloc_units (semantik benar: size=kapasitas, used=terpakai).
+ * OIDs adalah konstanta standar; hanya ip/community/port/version user-derived
+ * (sudah divalidasi). Semua spawn pakai arg-array — tanpa interpolasi shell.
  */
 async function getRealTimeSystemInfo(device) {
   const ip = device.ip_address;
@@ -321,57 +352,88 @@ async function getRealTimeSystemInfo(device) {
   const port = device.snmp_port || 161;
   const version = device.snmp_version || '2c';
 
-  if (!ip) { return { has_data: false }; }
-  // Phase 1: refuse to spawn if any user-derived value is malformed.
+  const result = {
+    has_data: false, sys_uptime_ticks: null, cpu_load_pct: null,
+    memory_total_bytes: null, memory_used_bytes: null,
+    storage_entries: [], temperature_c: null, fetched_at: new Date().toISOString()
+  };
+  if (!ip) return result;
   if (!_isValidTarget(ip) || !_isValidCommunity(community) || !_isValidPort(String(port))) {
-    return { has_data: false };
+    return result;
   }
 
-  return new Promise(resolve => {
-    // Run 2 SNMP gets in parallel. OIDs are hard-coded constants; only
-    // ip/community/port/version are user-derived and have been validated.
-    const getArgs = (oid) => ['-v' + version, '-c', community, '-t', '2', '-r', '0', ip + ':' + port, oid];
-    let completed = 0;
-    const result = { has_data: false, sys_uptime_ticks: null, cpu_load_pct: null };
+  const getArgs = (oid) => ['-v' + version, '-c', community, '-t', '2', '-r', '0', '-On', ip + ':' + port, oid];
+  const walkArgs = (oid) => ['-v' + version, '-c', community, '-t', '1', '-r', '0', '-On', ip + ':' + port, oid];
 
-    const finish = () => {
-      if (++completed < 2) return;
-      resolve(result);
-    };
-
-    const runSpawn = (oid) => new Promise((res) => {
-      const child = spawn('snmpget', getArgs(oid), { timeout: 4000 });
-      let stdout = '';
-      child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-      child.on('error', () => res(''));
-      child.on('close', () => res(stdout));
-    });
-
-    runSpawn('.1.3.6.1.2.1.1.3.0').then((stdout) => {
-      if (stdout) {
-        // "DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks: (12345) 0:00:01.23"
-        const m = stdout.match(/\((\d+)\)/);
-        if (m) {
-          result.sys_uptime_ticks = parseInt(m[1], 10);
-          result.has_data = true;
-        }
-      }
-      finish();
-    });
-
-    // hrProcessorLoad is a table — get the first entry
-    runSpawn('.1.3.6.1.2.1.25.3.3.1.2.1').then((stdout) => {
-      if (stdout) {
-        // "HOST-RESOURCES-MIB::hrProcessorLoad.1 = INTEGER: 5"
-        const m = stdout.match(/=\s*INTEGER:\s*(\d+)/);
-        if (m) {
-          result.cpu_load_pct = parseInt(m[1], 10);
-          result.has_data = true;
-        }
-      }
-      finish();
-    });
+  const runSpawn = (cmd, args) => new Promise((res) => {
+    const child = spawn(cmd, args, { timeout: cmd === 'snmpwalk' ? 6000 : 4000, maxBuffer: 1024 * 1024 });
+    let stdout = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.on('error', () => res(''));
+    child.on('close', () => res(stdout));
   });
+
+  const [uptimeOut, cpuOut, storageOut] = await Promise.all([
+    runSpawn('snmpget', getArgs('.1.3.6.1.2.1.1.3.0')),
+    runSpawn('snmpwalk', walkArgs('.1.3.6.1.2.1.25.3.3.1.2')),
+    runSpawn('snmpwalk', walkArgs('.1.3.6.1.2.1.25.2.3.1'))
+  ]);
+
+  // 1. sysUpTime: "... Timeticks: (378700) 0:46:18.00"
+  const tm = uptimeOut.match(/\((\d+)\)/);
+  if (tm) {
+    result.sys_uptime_ticks = parseInt(tm[1], 10);
+    result.has_data = true;
+  }
+
+  // 2. hrProcessorLoad table → rata-rata seluruh core.
+  if (cpuOut) {
+    const loads = [];
+    for (const line of cpuOut.split('\n')) {
+      const m = line.match(/=\s*INTEGER:\s*(\d+)/);
+      if (m) loads.push(parseInt(m[1], 10));
+    }
+    if (loads.length > 0) {
+      result.cpu_load_pct = Math.round(loads.reduce((a, b) => a + b, 0) / loads.length);
+      result.has_data = true;
+    }
+  }
+
+  // 3. hrStorageTable (kolom 2=type, 3=descr, 4=allocUnits, 5=size, 6=used).
+  if (storageOut) {
+    const rows = new Map(); // index -> {type, descr, alloc_units, size, used}
+    const ROOT = '.1.3.6.1.2.1.25.2.3.1.';
+    for (const line of storageOut.split('\n')) {
+      const m = line.match(/^\.1\.3\.6\.1\.2\.1\.25\.2\.3\.1\.([23456])\.(\d+)\s*=\s*(?:OID|STRING|INTEGER|Gauge32|Counter32):\s*(.+)$/);
+      if (!m) continue;
+      const col = m[1], idx = m[2], val = m[3].replace(/^"(.*)"$/, '$1').trim();
+      if (!rows.has(idx)) rows.set(idx, { storage_type: null, descr: '', alloc_units: 0, size: 0, used: 0 });
+      const r = rows.get(idx);
+      if (col === '2') r.storage_type = val;        // hrStorageType (OID)
+      if (col === '3') r.descr = val;               // hrStorageDescr
+      if (col === '4') r.alloc_units = parseInt(val, 10) || 0;
+      if (col === '5') r.size = parseFloat(val) || 0;
+      if (col === '6') r.used = parseFloat(val) || 0;
+    }
+    for (const r of rows.values()) {
+      if (!r.descr && !r.storage_type) continue;
+      result.storage_entries.push(r);
+      result.has_data = true;
+    }
+    // Memory = entri hrStorageRam (.1.3.6.1.2.1.25.2.1.2) atau deskripsi RAM.
+    const RAM_TYPE = '.1.3.6.1.2.1.25.2.1.2';
+    const ram = result.storage_entries.find(e => {
+      const d = (e.descr || '').trim().toLowerCase();
+      return e.storage_type === RAM_TYPE || d === 'main memory' || d === 'physical memory' ||
+        d === 'ram' || d === 'real memory' || d === 'system memory';
+    });
+    if (ram && ram.alloc_units > 0) {
+      result.memory_total_bytes = (ram.size || 0) * ram.alloc_units;
+      result.memory_used_bytes = (ram.used || 0) * ram.alloc_units;
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -705,12 +767,27 @@ function broadcastIncidentResolved(incident) {
   broadcastIncident(incident, 'RESOLVED');
 }
 
+/**
+ * Broadcast satu pesan log ke seluruh client yang sedang subscribe ke device tsb.
+ * Dipakai Log Collector utk update realtime Device Logs (type 'DEVICE_LOG').
+ */
+function broadcastToDevice(deviceId, payload) {
+  if (!wss) return;
+  const msg = JSON.stringify({ type: 'DEVICE_LOG', log: payload });
+  for (const [ws, sub] of clientSubscriptions.entries()) {
+    if (sub && sub.deviceId === deviceId && ws.readyState === ws.OPEN) {
+      ws.send(msg);
+    }
+  }
+}
+
 module.exports = {
   initStreamService,
   broadcastNewAlert,
   broadcastIncidentCreated,
   broadcastIncidentUpdated,
   broadcastIncidentResolved,
+  broadcastToDevice,
   getRealTimeInterfaces,
   realTimeSnmpPoll,
   getRealTimeInterfaceMbps,

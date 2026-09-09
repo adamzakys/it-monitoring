@@ -91,6 +91,32 @@ CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
 CREATE INDEX IF NOT EXISTS idx_incidents_started_at ON incidents(started_at DESC);
 
 -- =============================================================
+-- Device Logs (audit trail normalized — sumber: syslog/SNMP trap/dll)
+-- Raw selalu disimpan; kolom correlated_* diisi hanya saat rule korelasi
+-- menghasilkan Event (events.source = 'syslog'). Tidak semua log → Event,
+-- tidak semua Event → Incident.
+-- =============================================================
+CREATE TABLE IF NOT EXISTS device_logs (
+    id SERIAL PRIMARY KEY,
+    device_id INT REFERENCES devices(id) ON DELETE CASCADE,
+    source_ip VARCHAR(45),
+    source_type VARCHAR(20) DEFAULT 'syslog',
+    transport VARCHAR(20),
+    facility VARCHAR(20),
+    severity VARCHAR(20),
+    program VARCHAR(64),
+    message TEXT NOT NULL,
+    raw_message TEXT,
+    correlated_event_type VARCHAR(50),
+    correlated_at TIMESTAMP WITH TIME ZONE,
+    device_timestamp TIMESTAMP WITH TIME ZONE,
+    received_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_logs_device_id ON device_logs(device_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_device_logs_received_at ON device_logs(received_at);
+
+-- =============================================================
 -- Network Topology Tables (LLDP/CDP/MNDP discovery)
 -- =============================================================
 CREATE TABLE IF NOT EXISTS device_links (

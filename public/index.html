@@ -424,12 +424,6 @@
             <div class="deeplink-meta">
               <span id="detail-device-ip">--</span>
               <span class="deeplink-meta-sep">•</span>
-              <span id="detail-device-type">--</span>
-              <span class="deeplink-meta-sep">•</span>
-              <span id="detail-device-vendor">--</span>
-              <span class="deeplink-meta-sep">•</span>
-              <span id="detail-device-model">--</span>
-              <span class="deeplink-meta-sep">•</span>
               <span class="status-pill" id="detail-device-status">--</span>
               <span class="deeplink-meta-sep">•</span>
               <span id="detail-updated-at" style="font-size:0.65rem;color:var(--text-muted);">--</span>
@@ -464,10 +458,6 @@
                 <span class="dic-metric-label">Packet Loss</span>
                 <span class="dic-metric-value" id="detail-health-loss">--</span>
               </div>
-              <div class="dic-metric">
-                <span class="dic-metric-label">Uptime</span>
-                <span class="dic-metric-value" id="detail-health-uptime">--</span>
-              </div>
             </div>
           </div>
 
@@ -479,14 +469,6 @@
               </div>
             </div>
             <div class="dic-info-grid">
-              <div class="dic-info-row">
-                <span class="dic-info-label">Hostname</span>
-                <span class="dic-info-value" id="detail-overview-name">--</span>
-              </div>
-              <div class="dic-info-row">
-                <span class="dic-info-label">IP Address</span>
-                <span class="dic-info-value" id="detail-overview-ip">--</span>
-              </div>
               <div class="dic-info-row">
                 <span class="dic-info-label">Device Type</span>
                 <span class="dic-info-value" id="detail-overview-type">--</span>
@@ -510,10 +492,6 @@
               <div class="dic-info-row">
                 <span class="dic-info-label">Last Seen</span>
                 <span class="dic-info-value" id="detail-overview-lastseen">--</span>
-              </div>
-              <div class="dic-info-row">
-                <span class="dic-info-label">Interfaces</span>
-                <span class="dic-info-value" id="detail-overview-interfaces">--</span>
               </div>
             </div>
           </div>
@@ -569,33 +547,8 @@
             </div>
           </div>
 
-          <!-- ROW 4: ROOT CAUSE + TIMELINE (side by side) -->
-          <div class="dic-card dic-rootcause" id="detail-rootcause-card">
-            <div class="dic-card-header">
-              <div class="dic-card-title">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>
-                <h3>Root Cause</h3>
-              </div>
-              <span class="alert-severity-badge" id="detail-rootcause-severity" style="display:none;">--</span>
-            </div>
-            <div class="dic-rootcause-content" id="detail-rootcause-content">
-              <div class="dic-empty-state">No active incident</div>
-            </div>
-          </div>
-
-          <div class="dic-card dic-timeline" id="detail-timeline-card">
-            <div class="dic-card-header">
-              <div class="dic-card-title">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                <h3>Incident Timeline</h3>
-              </div>
-              <span id="detail-timeline-count" class="dic-count-badge">--</span>
-            </div>
-            <div class="dic-timeline-list" id="detail-timeline-list">
-              <div class="dic-empty-state">No active incident</div>
-            </div>
-          </div>
-
+          <!-- Incident aktif (Root Cause + Timeline) digabung di kartu
+               "Incidents & Activity" pada baris bawah — lihat ROW 6b. -->
           <!-- ROW 5: INTERFACE SUMMARY (Full Width) -->
           <div class="dic-card dic-interfaces">
             <div class="dic-card-header">
@@ -624,70 +577,91 @@
             </div>
           </div>
 
-          <!-- ROW 6: SYSTEM RESOURCES + RECENT EVENTS (side by side) -->
+          <!-- ROW 6: SYSTEM RESOURCES (kiri) + DEVICE LOG (kanan) -->
           <div class="dic-card dic-resources">
             <div class="dic-card-header">
               <div class="dic-card-title">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line></svg>
                 <h3>System Resources</h3>
               </div>
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <span class="dic-source-badge" id="detail-sys-source">sumber: --</span>
+                <span class="dic-freshness-inline" id="detail-sys-updated"></span>
+              </div>
             </div>
-            <div class="dic-resources-list">
-              <div class="dic-resource-item">
-                <div class="dic-resource-header">
-                  <span class="dic-resource-label">CPU Load</span>
-                  <span class="dic-resource-value" id="detail-sys-cpu">--</span>
-                </div>
-                <div class="dic-resource-bar"><span id="detail-sys-cpu-bar" style="width:0%"></span></div>
-              </div>
-              <div class="dic-resource-item">
-                <div class="dic-resource-header">
-                  <span class="dic-resource-label">Memory</span>
-                  <span class="dic-resource-value" id="detail-sys-memory">--</span>
-                </div>
-                <div class="dic-resource-bar"><span id="detail-sys-memory-bar" style="width:0%"></span></div>
-              </div>
-              <div class="dic-resource-item">
-                <div class="dic-resource-header">
-                  <span class="dic-resource-label">Storage</span>
-                  <span class="dic-resource-value" id="detail-sys-storage">--</span>
-                </div>
-                <div class="dic-resource-bar"><span id="detail-sys-storage-bar" style="width:0%"></span></div>
-              </div>
-              <div class="dic-resource-item">
-                <div class="dic-resource-header">
-                  <span class="dic-resource-label">Temperature</span>
-                  <span class="dic-resource-value" id="detail-sys-temp">--</span>
-                </div>
-                <div class="dic-resource-bar"><span id="detail-sys-temp-bar" style="width:0%"></span></div>
-              </div>
+            <div class="dic-resources-list" id="detail-sys-list">
+              <div class="dic-empty-state">Loading system metrics…</div>
             </div>
           </div>
 
-          <div class="dic-card dic-events">
+          <!-- ROW 6a: DEVICE LOG — audit trail log perangkat (syslog/SNMP trap) -->
+          <div class="dic-card dic-log">
             <div class="dic-card-header">
               <div class="dic-card-title">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-                <h3>Recent Events</h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"></path><line x1="8" y1="9" x2="16" y2="9"></line><line x1="8" y1="13" x2="14" y2="13"></line><line x1="8" y1="17" x2="12" y2="17"></line></svg>
+                <h3>Device Log</h3>
               </div>
-              <span id="detail-events-count" class="dic-count-badge">--</span>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span class="dic-live-dot" id="detail-log-live" title="Realtime stream"></span>
+                <span id="detail-log-count" class="dic-count-badge">0</span>
+                <select id="detail-log-mode" class="select-interface" style="width:auto;" aria-label="Mode tampilan log">
+                  <option value="normalized">Normalized</option>
+                  <option value="raw">Raw (asli)</option>
+                </select>
+                <select id="detail-log-sev" class="select-interface" style="width:auto;" aria-label="Filter severity">
+                  <option value="all">All severity</option>
+                  <option value="warning">warning+</option>
+                  <option value="error">error+</option>
+                  <option value="critical">critical+</option>
+                </select>
+              </div>
             </div>
-            <div class="dic-events-list" id="detail-events-list">
-              <div class="dic-empty-state">Loading events...</div>
+            <div class="dic-log-list" id="detail-log-list">
+              <div class="dic-empty-state">Loading device logs…</div>
             </div>
+            <div class="dic-log-footer" id="detail-log-hint"></div>
           </div>
 
-          <!-- ROW 7: INCIDENT HISTORY (Full Width) -->
-          <div class="dic-card dic-history">
+          <!-- ROW 6b: INCIDENTS & ACTIVITY (satu kartu, peran jelas) -->
+          <div class="dic-card dic-incidents">
             <div class="dic-card-header">
               <div class="dic-card-title">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                <h3>Incident History</h3>
+                <h3>Incidents &amp; Activity</h3>
               </div>
-              <span id="detail-history-count" class="dic-count-badge">--</span>
+              <span class="dic-freshness-inline">Incident aktif (timeline) vs riwayat vs event state-change</span>
             </div>
-            <div class="dic-history-list" id="detail-history-list">
-              <div class="dic-empty-state">No incident history</div>
+            <div class="dic-incident-grid">
+              <!-- Kiri: incident AKTIF — root cause + timeline -->
+              <div class="dic-incident-panel" id="detail-rootcause-card">
+                <div class="dic-panel-title">Active Incident — Root Cause
+                  <span class="alert-severity-badge" id="detail-rootcause-severity" style="display:none;">--</span>
+                </div>
+                <div class="dic-rootcause-content" id="detail-rootcause-content">
+                  <div class="dic-empty-state">No active incident</div>
+                </div>
+                <div class="dic-panel-title" style="margin-top:16px;">Incident Timeline
+                  <span id="detail-timeline-count" class="dic-count-badge">--</span>
+                </div>
+                <div class="dic-timeline-list" id="detail-timeline-list">
+                  <div class="dic-empty-state">No active incident timeline</div>
+                </div>
+              </div>
+              <!-- Kanan: riwayat incident + event state-change hasil polling -->
+              <div class="dic-incident-panel" id="detail-timeline-card">
+                <div class="dic-panel-title">Incident History
+                  <span id="detail-history-count" class="dic-count-badge">--</span>
+                </div>
+                <div class="dic-history-list" id="detail-history-list">
+                  <div class="dic-empty-state">No incident history</div>
+                </div>
+                <div class="dic-panel-title" style="margin-top:16px;">Recent Events
+                  <span id="detail-events-count" class="dic-count-badge">--</span>
+                </div>
+                <div class="dic-events-list" id="detail-events-list">
+                  <div class="dic-empty-state">Loading events...</div>
+                </div>
+              </div>
             </div>
           </div>
 

@@ -490,69 +490,137 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
       interfaces.length = 0;
     }
 
-    // 2b. Fallback to real-time SNMP walk for newly-added devices
-    // (no InfluxDB data yet because Telegraf hasn't written with new device_id)
+    // 2c. Realtime fallbacks (SNMP walk / ICMP ping / system info) run only for
+    // devices without InfluxDB data yet. They run in PARALLEL under a shared
+    // budget so one slow/unreachable SNMP agent cannot hold the whole deep-dive
+    // response for its full serial timeout (~4s+).
+    const needIfaceFallback = interfaces.length === 0 && device && device.ip_address;
+    const needPingFallback = latencyHist.length === 0 && device && device.ip_address;
+    const needSysFallback = device && device.ip_address && (
+      systemMetrics.sys_uptime_ticks == null ||
+      systemMetrics.cpu_load_pct == null ||
+      systemMetrics.memory_total == null ||
+      systemMetrics.storage_entries.length === 0
+    );
+
+    const withBudget = (p, ms) => new Promise((resolve) => {
+      const t = setTimeout(() => resolve(null), ms);
+      Promise.resolve(p)
+        .then((v) => { clearTimeout(t); resolve(v); })
+        .catch(() => { clearTimeout(t); resolve(null); });
+    });
+
+    const [realtimeIfaces, ping, realtimeSys] = await Promise.all([
+      needIfaceFallback ? withBudget(streamService.getRealTimeInterfaces(device), 2500) : Promise.resolve(null),
+      needPingFallback ? withBudget(streamService.realTimePing(device.ip_address), 2500) : Promise.resolve(null),
+      needSysFallback ? withBudget(streamService.getRealTimeSystemInfo(device), 2500) : Promise.resolve(null)
+    ]);
+
     let realtimeFallback = false;
-    if (interfaces.length === 0 && device && device.ip_address) {
-      try {
-        const realtimeIfaces = await streamService.getRealTimeInterfaces(device);
-        if (realtimeIfaces && realtimeIfaces.length > 0) {
-          interfaces.push(...realtimeIfaces.map(i => ({
-            interface_name: i.interface_name,
-            oper_status: i.oper_status,
-            speed_mbps: i.speed_mbps,
-            bytes_in: i.bytes_in,
-            bytes_out: i.bytes_out,
-            source: 'realtime-snmp'
-          })));
-          realtimeFallback = true;
-          console.log(`[DeepDive] Device ${id}: using realtime SNMP for ${realtimeIfaces.length} interfaces (no InfluxDB data yet)`);
-        }
-      } catch (e) {
-        // silent
-      }
+    if (realtimeIfaces && realtimeIfaces.length > 0) {
+      interfaces.push(...realtimeIfaces.map(i => ({
+        interface_name: i.interface_name,
+        oper_status: i.oper_status,
+        speed_mbps: i.speed_mbps,
+        bytes_in: i.bytes_in,
+        bytes_out: i.bytes_out,
+        source: 'realtime-snmp'
+      })));
+      realtimeFallback = true;
+      console.log(`[DeepDive] Device ${id}: using realtime SNMP for ${realtimeIfaces.length} interfaces (no InfluxDB data yet)`);
     }
 
-    // Also fall back for latency/loss if no InfluxDB data
+    // Also fall back for latency/loss if no InfluxDB data (single ping → ±30 pts)
     let realtimeLatencyHist = [];
     let realtimeLossHist = [];
-    if (latencyHist.length === 0 && device && device.ip_address) {
-      try {
-        const ping = await streamService.realTimePing(device.ip_address);
-        if (ping && ping.reachable) {
-          const now = new Date();
-          realtimeLatencyHist = Array.from({ length: 30 }, (_, i) => {
-            const t = new Date(now.getTime() - (29 - i) * 5000);
-            return { time: t.toISOString(), min: ping.latency_ms, avg: ping.latency_ms, max: ping.latency_ms, jitter: 0 };
-          });
-          realtimeLossHist = Array.from({ length: 30 }, (_, i) => {
-            const t = new Date(now.getTime() - (29 - i) * 5000);
-            return { time: t.toISOString(), value: ping.packet_loss || 0 };
-          });
-        }
-      } catch (e) { /* silent */ }
+    if (ping && ping.reachable) {
+      const now = new Date();
+      realtimeLatencyHist = Array.from({ length: 30 }, (_, i) => {
+        const t = new Date(now.getTime() - (29 - i) * 5000);
+        return { time: t.toISOString(), min: ping.latency_ms, avg: ping.latency_ms, max: ping.latency_ms, jitter: 0 };
+      });
+      realtimeLossHist = Array.from({ length: 30 }, (_, i) => {
+        const t = new Date(now.getTime() - (29 - i) * 5000);
+        return { time: t.toISOString(), value: ping.packet_loss || 0 };
+      });
     }
 
-    // 3. Format sys_uptime (centi-seconds → human readable)
-    // Fallback to realtime if InfluxDB empty
-    if (!systemMetrics.sys_uptime_ticks && device && device.ip_address) {
-      try {
-        const rt = await streamService.getRealTimeSystemInfo(device);
-        if (rt.has_data) {
-          systemMetrics.sys_uptime_ticks = rt.sys_uptime_ticks;
-          systemMetrics.cpu_load_pct = rt.cpu_load_pct;
-          systemMetrics.has_data = true;
-        }
-      } catch (e) { /* silent */ }
-    }
+    // 3. System resources — gabung per-metrik: InfluxDB (riwayat 60s telegraf)
+    // primer; SNMP realtime hanya melengkapi metrik yang belum ada di Influx.
+    // Nilai apa pun yang tampil berasal dari salah satu sumber nyata tsb.
+    const rtSys = (realtimeSys && realtimeSys.has_data) ? realtimeSys : null;
+    const pick = (influxVal, rtVal) => {
+      if (influxVal !== null && influxVal !== undefined) return { value: influxVal, source: 'influx' };
+      if (rtVal !== null && rtVal !== undefined) return { value: rtVal, source: 'snmp' };
+      return null;
+    };
+
+    const uptime = pick(systemMetrics.sys_uptime_ticks, rtSys ? rtSys.sys_uptime_ticks : null);
+    const cpu = pick(systemMetrics.cpu_load_pct, rtSys ? rtSys.cpu_load_pct : null);
+    const memory = pick(systemMetrics.memory_total, rtSys ? rtSys.memory_total_bytes : null);
+    const memoryUsed = pick(systemMetrics.memory_used, rtSys ? rtSys.memory_used_bytes : null);
+
+    // Storage (unit hrStorage: jumlah unit × alloc_units = bytes).
+    const influxStorageRaw = (systemMetrics.storage_entries || []).filter(e => (e.alloc_units || 0) > 0);
+    const rtStorageRaw = ((rtSys && rtSys.storage_entries) || []).filter(e => (e.alloc_units || 0) > 0);
+    const storageRaw = influxStorageRaw.length > 0 ? influxStorageRaw : rtStorageRaw;
+    const storageSource = influxStorageRaw.length > 0 ? 'influx' : (rtStorageRaw.length > 0 ? 'snmp' : null);
+    const toBytes = (e) => ({
+      descr: e.descr || '', storage_type: e.storage_type || '',
+      total_bytes: (e.size || 0) * e.alloc_units,
+      used_bytes: (e.used || 0) * e.alloc_units
+    });
+    const storageEntriesBytes = storageRaw.map(toBytes);
+
+    // sys_uptime_human — kompatibel dgn konsumen lama.
     let sysUptimeHuman = null;
-    if (systemMetrics.sys_uptime_ticks) {
-      const totalSec = Math.floor(systemMetrics.sys_uptime_ticks / 100);
+    if (uptime && uptime.value) {
+      const totalSec = Math.floor(uptime.value / 100);
       const days = Math.floor(totalSec / 86400);
       const hours = Math.floor((totalSec % 86400) / 3600);
       const mins = Math.floor((totalSec % 3600) / 60);
       sysUptimeHuman = `${days}d ${hours}h ${mins}m`;
     }
+
+    const canSnmp = !!(device && device.ip_address && device.snmp_community);
+    const noDataReason = canSnmp
+      ? 'Perangkat tidak merespons atau tidak menyediakan metrik ini via SNMP/InfluxDB'
+      : 'Perangkat tidak dikonfigurasi SNMP dan belum ada riwayat InfluxDB';
+    const metric = (sel, label, reason = null) => sel
+      ? { supported: true, source: sel.source, ...(label && { value: sel.value }) }
+      : { supported: false, reason: reason || noDataReason, source: null };
+
+    const system = {
+      has_data: !!(uptime || cpu || memory || storageEntriesBytes.length > 0 || systemMetrics.has_data),
+      source: systemMetrics.sys_uptime_ticks != null || systemMetrics.cpu_load_pct != null || influxStorageRaw.length > 0
+        ? 'influx'
+        : (rtSys ? 'snmp' : null),
+      updated_at: systemMetrics.fetched_at || (rtSys && rtSys.fetched_at) || new Date().toISOString(),
+      // Legacy (backward-compat): tetap diekspos untuk konsumen lama
+      // (storage_entries dalam satuan hrStorage: alloc_units/size/used).
+      sys_uptime_ticks: uptime ? uptime.value : null,
+      sys_uptime_human: sysUptimeHuman,
+      cpu_load_pct: cpu ? cpu.value : null,
+      storage_entries: storageRaw,
+      // Struktur baru (vendor-agnostic): tiap metrik { supported, value, source }.
+      uptime: metric(uptime),
+      cpu_load_pct: metric(cpu, true, 'CPU load tidak tersedia (tidak ada hrProcessorLoad/telegraf)'),
+      memory: memory && memoryUsed
+        ? {
+            supported: true, source: memory.source,
+            total_bytes: memory.value, used_bytes: memoryUsed.value,
+            pct: memory.value > 0 ? parseFloat(((memoryUsed.value / memory.value) * 100).toFixed(1)) : 0
+          }
+        : { supported: false, reason: noDataReason, source: null },
+      storage: storageEntriesBytes.length > 0
+        ? { supported: true, source: storageSource, entries: storageEntriesBytes }
+        : { supported: false, reason: 'Perangkat tidak melaporkan storage via hrStorage (HOST-RESOURCES)', source: null },
+      temperature_c: { supported: false, reason: 'Sensor suhu tidak dilaporkan perangkat via SNMP (HOST-RESOURCES/health kosong)', source: null },
+      battery: { supported: false, reason: 'Perangkat tidak melaporkan baterai/UPS (UPS-MIB tidak tersedia)', source: null },
+      unsupported: []
+    };
+    system.unsupported = ['temperature_c', 'battery']
+      .filter(k => system[k] && system[k].supported === false);
 
     // 4. Format latency stats summary
     // Use real-time ping data if InfluxDB is empty
@@ -604,14 +672,23 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
       loss_history: effectiveLossHist,
       loss_summary: lossSummary,
       data_source: realtimeFallback ? 'realtime-snmp' : 'influxdb',
-      system: {
-        sys_uptime_ticks: systemMetrics.sys_uptime_ticks,
-        sys_uptime_human: sysUptimeHuman,
-        cpu_load_pct: systemMetrics.cpu_load_pct,
-        storage_entries: systemMetrics.storage_entries || [],
-        has_data: systemMetrics.has_data
-      }
+      system
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// 3a2. Device Logs — audit trail normalized (syslog/SNMP trap), terbaru dulu.
+router.get('/devices/:id/logs', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ success: false, error: 'Invalid device id' });
+  try {
+    const logStore = require('../services/logCollector/store');
+    const limit = parseInt(req.query.limit, 10) || 200;
+    const after = parseInt(req.query.after, 10) || 0;
+    const logs = await logStore.getLogs(id, limit, after);
+    res.json({ success: true, device_id: id, logs, source: 'device_logs' });
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
   }
