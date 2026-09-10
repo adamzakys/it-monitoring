@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS device_links (
     target_port_id VARCHAR(100),
     target_port_desc VARCHAR(255),
     target_ip INET,
+    manual_ipv4 TEXT NULL,
     target_device_id INT REFERENCES devices(id) ON DELETE SET NULL,
     protocol VARCHAR(10) DEFAULT 'lldp',
     discovered_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),

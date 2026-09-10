@@ -409,7 +409,14 @@ function parseLldpWalk(walkResults) {
       if (byIndex[k]) { target = byIndex[k]; break; }
     }
     if (!target) continue;
-    // Prefer IPv4 (matches our device inventory addressing) over IPv6.
+
+    // PERBAIKAN: Simpan SEMUA IP valid ke array alih-alih menimpa satu-satu.
+    // Ini agar kita bisa melakukan resolusi cerdas kemudian (Global IPv4 > ARP > Link-Local IPv6).
+    if (!target.all_ips) target.all_ips = [];
+    if (!target.all_ips.includes(ip)) {
+      target.all_ips.push(ip);
+    }
+    // Tetap simpan preferensi lama (IPv4 diutamakan) sebagai fallback cepat.
     if (!target.ip || RE_IPV4.test(ip)) {
       target.ip = ip;
     }
@@ -462,18 +469,44 @@ async function matchNeighbor(sourceDevice, allDevices, neighbor, arpMap) {
     targetSysName: neighbor.sysName || neighbor.deviceId || null
   };
 
-  // Normalize chassisId: lowercase, colon-separated, strip any remaining quotes/whitespace
+  // Helper: normalisasi MAC address (bisa dipergunakan berkali-kali)
   const normalizeMac = (mac) => {
     if (!mac) return null;
     let s = String(mac).toLowerCase().trim();
     s = s.replace(/^["']+|["']+$/g, ''); // strip surrounding quotes
-    s = s.replace(/[\s\-]+/g, ':');         // spaces/dashes → colons
+    s = s.replace(/[\s\-]+/g, ':');       // spaces/dashes → colons
     // Validate: 6 hex octets
     if (!/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(s)) return null;
     return s;
   };
 
   const normalizedChassis = normalizeMac(neighbor.chassisId);
+  
+  // NEW HELPER: Pilih IP terbaik dari semua kandidat yang tersedia.
+  // Prioritas: 1) IPv4 Global  2) Link-Local IPv6
+  const pickBestIp = (ips) => {
+    if (!ips || ips.length === 0) return null;
+    // Coba temukan Global IPv4 dulu
+    const ipv4 = ips.find(ip => ip && !ip.includes(':') && RE_IPV4.test(ip));
+    if (ipv4) return ipv4;
+    // Fallback ke IPv6 link-local
+    const ipv6 = ips.find(ip => ip && (ip.startsWith('fe80:') || ip.startsWith('fd00:')));
+    return ipv6 || ips[0]; // akhirnya ambil pertama saja
+  };
+
+  // --- STRATEGY BARU: Coba ARP correlation pada SEMUA IP kandidat ---
+  // Jika neighbor.all_ips ada, cari mana yang punya entri ARP dari mesin sumber.
+  if (arpMap && arpMap.size > 0) {
+    // Arah langsung neighbor.ip jika ada
+    if (neighbor.ip && arpMap.has(neighbor.ip)) {
+      result.targetIp = neighbor.ip; // ini kemungkinan besar ARP cache lokal
+    }
+
+    // Juga cek neighbor.all_ips[] — coba cocokkan dengan ARP entries.
+    // Kita tidak bisa langsung cocokkan IP ↔ MAC secara langsung tanpa MIB tambahan,
+    // tapi kita bisa reverse-enrich: saat neighbor matched nanti, kita kumpulkan 
+    // semua ARP yang cocok chassis_id sebagai kandidat alternatif.
+  }
 
   // Strategy 1: MAC → ARP → IP → match
   if (normalizedChassis && arpMap && arpMap.size > 0) {
@@ -488,8 +521,36 @@ async function matchNeighbor(sourceDevice, allDevices, neighbor, arpMap) {
     }
   }
 
-  // Strategy 2: IP direct (from CDP or LLDP)
-  if (neighbor.ip) {
+  // Strategy 2: IP direct dari semua kandidat (neighbor.all_ips[])
+  // Coba satu-per-satu, prioritaskan Global IPv4
+  if (neighbor.all_ips && neighbor.all_ips.length > 0) {
+    const candidates = [...neighbor.all_ips];
+    // Sort: IPv4 first (kebaikan heuristik karena inventori kita pakai IPv4)
+    candidates.sort((a, b) => {
+      const aV4 = RE_IPV4.test(a);
+      const bV4 = RE_IPV4.test(b);
+      if (aV4 && !bV4) return -1;
+      if (!aV4 && bV4) return 1;
+      return 0;
+    });
+
+    for (const candidateIp of candidates) {
+      if (!candidateIp) continue;
+      // Cocokkan langsung dengan inventory device
+      const matched = allDevices.find(d => d.ip_address === candidateIp);
+      if (matched) {
+        result.targetDeviceId = matched.id;
+        result.targetIp = candidateIp;
+        return result;
+      }
+    }
+
+    // Tidak ada match device, simpan kandidat terbaik sebagai targetIp (fallback)
+    if (!result.targetIp) {
+      result.targetIp = pickBestIp(candidates);
+    }
+  } else if (neighbor.ip) {
+    // Fallback lama: neighbor.ip tunggal
     result.targetIp = neighbor.ip;
     const matched = allDevices.find(d => d.ip_address === neighbor.ip);
     if (matched) {
@@ -764,6 +825,52 @@ async function discoverTopology() {
 
   // Mark links as stale (in DB) that weren't seen this run — they'll be deleted by cleanup if too old
   // (This is already done by markAllLinksStale() at the start)
+
+  // ===============================================================
+  // PERBAIKAN CRUSIAL: Setelah semua walk selesai, lakukan ARP
+  // sweep menyeluruh pada semua tabel ARP yang sudah dikumpulkan.
+  // Tujuannya: ketika paket LLDP tidak mengirimkan Global IPv4
+  // (hanya mengirim fe80:: ...), kita masih bisa menemukan alamat
+  // IPv4 sungguhan dengan mencocokkan chassis_id tetangga ke entri
+  // ARP dari SEMUA perangkat terkelola di jaringan.
+  // ===============================================================
+  const macToIpv4 = new Map();        // normalizedMac → first-found IPv4 (terhindar IPv4)
+  const seenTargets = new Set();       // track targetChassisId agar tidak double-lookup
+
+  for (const device of allDevices) {
+    if (!device.ip_address || device.status === 'offline') continue;
+    try {
+      const arpTable = await getArpTable(device);
+      for (const [mac, ip] of arpTable) {
+        // Jika ini IPv4 Global & belum pernah dicatat untuk MAC ini → simpan.
+        if (ip && RE_IPV4.test(ip) && !macToIpv4.has(mac)) {
+          macToIpv4.set(mac, ip);
+        }
+      }
+    } catch (_) { /* abaikan jika perangkat tidak responsif */ }
+  }
+
+  // Patch setiap link yang memiliki targetChassisId tanpa IPv4, ganti dg hasil ARP.
+  for (const link of allLinks) {
+    if (link.target_device_id) continue;                       // skip managed
+    if (link.target_chassis_id && !seenTargets.has(link.target_chassis_id)) {
+      seenTargets.add(link.target_chassis_id);
+      // Normalisasi chassis_id biar cocok dengan format tabel ARP
+      let rawMac = String(link.target_chassis_id).replace(/^["']+|["']+$/g, '').toLowerCase().trim();
+      rawMac = rawMac.replace(/[\s\-]+/g, ':');
+      // Validasi hex simple (minimal 6-oktet)
+      if (/^[0-9a-f]{12,}/i.test(rawMac.replace(/:/g, ''))) {
+        const lookupMac = rawMac.slice(0, 17);                // XX:XX:XX:XX:XX:XX
+        const ipv4 = macToIpv4.get(lookupMac);
+        if (ipv4 && RE_IPV4.test(ipv4)) {
+          console.log(`[TopologyDiscovery] Found IPv4 ${ipv4} for unmanaged ${link.target_sys_name || link.target_chassis_id} via ARP`);
+          link.target_ip = ipv4;                             // timpa nilai lama (IPv6/link-local)
+        } else {
+          console.warn(`[TopologyDiscovery] No ARP match for chassis ${link.target_chassis_id}`);
+        }
+      }
+    }
+  }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
   console.log(`[TopologyDiscovery] Discovery complete in ${elapsed}s — ${stats.lldp} LLDP, ${stats.cdp} CDP links, ${errors.length} errors`);

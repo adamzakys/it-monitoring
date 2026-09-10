@@ -1260,7 +1260,7 @@ router.get('/topology', async (req, res) => {
     if (db.isPostgresConnected()) {
       const r = await db.query(
         `SELECT id, source_device_id, source_interface, target_chassis_id, target_sys_name,
-                target_port_id, target_port_desc, target_ip, target_device_id, protocol,
+                target_port_id, target_port_desc, target_ip, manual_ipv4, target_device_id, protocol,
                 last_seen, stale
          FROM device_links
          WHERE stale = false
@@ -1286,8 +1286,33 @@ router.get('/topology', async (req, res) => {
     }));
 
     // Build edges for Vis.js — split into managed (with target_device_id) and unmanaged
+    // PERBAIKAN: Kumpulkan semua kandidat IP unik per unmanaged NODE dari SEMUA link,
+    // bukan hanya dari satu link yang sedang diproses. Ini memastikan jika device terhubung
+    // lewat beberapa port/link, kita mendapatkan semua IP yang pernah terlihat oleh semua perangkat tetangga.
+    const ipMapByUnmanagedKey = new Map(); // key -> Set<ip>
+    const manualIpv4MapByUnmanagedKey = new Map(); // key -> first-found manual_ipv4
+
+    for (const link of links) {
+      if (link.target_device_id) continue; // skip managed, handle later
+      const key = link.target_chassis_id || link.target_sys_name || `unmanaged-${link.id}`;
+      if (!ipMapByUnmanagedKey.has(key)) {
+        ipMapByUnmanagedKey.set(key, new Set());
+      }
+      // Tambahkan IP otomatis dari LLDP/ARP ke kandidat
+      if (link.target_ip) {
+        ipMapByUnmanagedKey.get(key).add(link.target_ip);
+      }
+      // Simpan manual_ipv4 jika admin sudah mengaturnya secara manual
+      if (link.manual_ipv4 && !manualIpv4MapByUnmanagedKey.has(key)) {
+        manualIpv4MapByUnmanagedKey.set(key, link.manual_ipv4.trim());
+        // Juga masukkan manual_ipv4 ke kandidat agar prioritas logika tetap aman
+        ipMapByUnmanagedKey.get(key).add(link.manual_ipv4.trim());
+      }
+    }
+
+    // Bangun edges & nodes terintegrasi
     const edges = [];
-    const unmanagedNodes = new Map(); // dedup by chassis_id or sysName
+    const unmanagedNodes = new Map();
 
     for (const link of links) {
       const sourceId = link.source_device_id;
@@ -1311,10 +1336,30 @@ router.get('/topology', async (req, res) => {
         // Unmanaged device — create pseudo-node keyed by chassis_id or sysName
         const key = link.target_chassis_id || link.target_sys_name || `unmanaged-${link.id}`;
         if (!unmanagedNodes.has(key)) {
+          const allCands = Array.from(ipMapByUnmanagedKey.get(key) || new Set());
+          
+          // PRIORITY ORDER: 1) manual_ipv4 > 2) IPv4 Global otomatis > 3) IPv6 Link-Local
+          let preferredIp = null;
+          const manualIp = manualIpv4MapByUnmanagedKey.get(key);
+          if (manualIp) {
+            preferredIp = manualIp; // manual override selalu menang
+          } else {
+            // Cari IPv4 Global dari kandidat otomatis
+            for (const cand of allCands) {
+              if (cand && typeof cand === 'string' && !cand.includes(':')) {
+                preferredIp = cand;
+                break;
+              }
+            }
+            if (!preferredIp) preferredIp = allCands[0] || null; // fallback ke IPv6
+          }
+
           unmanagedNodes.set(key, {
             id: `unmanaged-${key}`,
             label: link.target_sys_name || link.target_chassis_id || 'Unknown',
-            ip: link.target_ip,
+            ip: preferredIp,           // ✅ Prioritas: manual_ipv4 > IPv4 Auto > IPv6
+            all_ips: allCands,         // ✅ DAFTAR LENGKAP IP kandidat (IPv4 + IPv6)
+            manual_ipv4_set: !!manualIp, // Flag apakah admin sudah setting manual
             type: 'unmanaged',
             status: 'unmanaged',
             color: '#64748b',
@@ -1375,6 +1420,30 @@ router.post('/topology/discover', async (req, res) => {
       message: 'Topology discovery completed',
       ...result
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// PUT /api/topology/manual-ip/:linkId — set/update manual IPv4 override per-link
+router.put('/topology/manual-ip/:linkId', async (req, res) => {
+  const linkId = parseInt(req.params.linkId, 10);
+  if (!linkId || isNaN(linkId)) return res.status(400).json({ success: false, error: 'Invalid link ID' });
+  try {
+    const ipAddr = req.body.manual_ipv4 ? String(req.body.manual_ipv4).trim() : null;
+    // Validasi format IPv4 sederhana jika tidak NULL
+    if (ipAddr && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ipAddr)) {
+      return res.status(400).json({ success: false, error: 'Format IPv4 tidak valid' });
+    }
+    if (db.isPostgresConnected()) {
+      await db.query('UPDATE device_links SET manual_ipv4 = $1 WHERE id = $2', [ipAddr, linkId]);
+    } else {
+      const store = db.getMemoryStore();
+      const links = store.device_links || [];
+      const link = links.find(l => l.id === linkId);
+      if (link) link.manual_ipv4 = ipAddr;
+    }
+    res.json({ success: true, message: 'Manual IPv4 berhasil diperbarui', manual_ipv4: ipAddr });
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
   }
