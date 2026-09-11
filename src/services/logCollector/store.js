@@ -171,8 +171,88 @@ async function cleanup(days = 7) {
   }
 }
 
+/** id log terbaru untuk device (cursor verifikasi). 0 bila belum ada. */
+async function getLatestLogId(deviceId) {
+  if (db.isPostgresConnected()) {
+    try {
+      const r = await db.query(
+        'SELECT COALESCE(MAX(id), 0) AS max_id FROM device_logs WHERE device_id = $1',
+        [deviceId]
+      );
+      return parseInt(r.rows[0].max_id, 10) || 0;
+    } catch (e) {
+      console.error('[LogStore] getLatestLogId error:', e.message);
+    }
+  }
+  const ids = ring.filter(x => x.deviceId === deviceId).map(x => Number(x.id) || 0);
+  return ids.length > 0 ? Math.max(...ids) : 0;
+}
+
+/**
+ * Tunggu sampai ada log BARU (id > sinceId) untuk device. Polling tiap pollMs.
+ * Resolve dengan baris log (public) atau null bila timeout.
+ * Dipakai endpoint verifikasi aktif syslog (user menjalankan /log warning "...").
+ */
+async function watchForNewLog(deviceId, sinceId, timeoutMs = 45000, pollMs = 1000) {
+  const since = parseInt(sinceId, 10) || 0;
+  const budget = Math.min(Math.max(parseInt(timeoutMs, 10) || 45000, 1000), 60000);
+  const deadline = Date.now() + budget;
+
+  while (Date.now() < deadline) {
+    if (db.isPostgresConnected()) {
+      try {
+        const r = await db.query(
+          'SELECT * FROM device_logs WHERE device_id = $1 AND id > $2 ORDER BY id DESC LIMIT 1',
+          [deviceId, since]
+        );
+        if (r.rows.length > 0) return toPublic(r.rows[0]);
+      } catch (e) {
+        console.error('[LogStore] watchForNewLog error:', e.message);
+      }
+    } else {
+      const hit = ring.find(x => x.deviceId === deviceId && (Number(x.id) || 0) > since);
+      if (hit) return { ...hit, receivedAt: hit.receivedAt || new Date().toISOString() };
+    }
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+  return null;
+}
+
+/**
+ * Hitung log yang GAGAL di-resolve ke device mana pun (device_id NULL)
+ * dari sebuah source IP dalam rentang waktu tertentu. Mendeteksi kasus
+ * perangkat mengirim syslog dari IP yang tidak terdaftar di inventory.
+ */
+async function countUnmatchedByIp(ip, sinceMs = 600000) {
+  if (!ip) return 0;
+  const windowMs = Math.max(0, parseInt(sinceMs, 10) || 0);
+  if (db.isPostgresConnected()) {
+    try {
+      const r = await db.query(
+        `SELECT COUNT(*) AS n FROM device_logs
+          WHERE device_id IS NULL AND source_ip = $1
+            AND received_at >= NOW() - ($2::numeric * INTERVAL '1 millisecond')`,
+        [ip, String(windowMs)]
+      );
+      return parseInt(r.rows[0].n, 10) || 0;
+    } catch (e) {
+      console.error('[LogStore] countUnmatchedByIp error:', e.message);
+    }
+  }
+  return ring.filter(x => !x.deviceId && x.sourceIp === ip).length;
+}
+
 function status() {
   return { pg: db.isPostgresConnected(), ring: ring.length };
 }
 
-module.exports = { insertLog, getLogs, resolveDevice, cleanup, status };
+module.exports = {
+  insertLog,
+  getLogs,
+  getLatestLogId,
+  watchForNewLog,
+  countUnmatchedByIp,
+  resolveDevice,
+  cleanup,
+  status
+};

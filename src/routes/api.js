@@ -679,6 +679,85 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
   }
 });
 
+// ============================================================================
+// Configuration Readiness Advisor — Pre-flight diagnostics per device
+// Returns: checks (5 layers), gaps, dynamic command recommendations
+// ============================================================================
+router.get('/devices/:id/readiness', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ success: false, error: 'Invalid device id' });
+
+  try {
+    const profiler = require('../services/profiler');
+    const result = await profiler.getReadiness(id);
+    if (!result.success) {
+      return res.status(404).json({ success: false, error: result.error || 'Device not found' });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// ============================================================================
+// Syslog Forwarding — status + verifikasi aktif
+// ----------------------------------------------------------------------------
+// Syslog push & event-driven: "ada log historis" bukan bukti konfigurasi masih
+// aktif. /syslog-status memakai jendela pendek; /syslog-verify menunggu log
+// BARU setelah cursor → user menjalankan `/log warning "BMS-TEST"` di device.
+// ============================================================================
+router.get('/devices/:id/syslog-status', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ success: false, error: 'Invalid device id' });
+
+  try {
+    let device = null;
+    if (db.isPostgresConnected()) {
+      const r = await db.query('SELECT * FROM devices WHERE id = $1', [id]);
+      device = r.rows[0] || null;
+    }
+    if (!device) device = db.getMemoryStore().devices.find(d => d.id === id) || null;
+    if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
+
+    const profiler = require('../services/profiler');
+    const logStore = require('../services/logCollector/store');
+    const check = await profiler.checkSyslog(device);
+    const cursorId = await logStore.getLatestLogId(id);
+
+    res.json({
+      success: true,
+      device_id: id,
+      check,
+      cursorId,
+      server_time: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+router.get('/devices/:id/syslog-verify', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ success: false, error: 'Invalid device id' });
+
+  const sinceId = parseInt(req.query.sinceId, 10) || 0;
+  const timeout = Math.min(Math.max(parseInt(req.query.timeout, 10) || 45000, 1000), 60000);
+
+  try {
+    const logStore = require('../services/logCollector/store');
+    const log = await logStore.watchForNewLog(id, sinceId, timeout);
+    res.json({
+      success: true,
+      received: !!log,
+      log: log || null,
+      since_id: sinceId,
+      waited_ms: timeout
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
 // 3a2. Device Logs — audit trail normalized (syslog/SNMP trap), terbaru dulu.
 router.get('/devices/:id/logs', async (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -1258,18 +1337,20 @@ router.get('/topology', async (req, res) => {
 
     let links = [];
     if (db.isPostgresConnected()) {
+      // Link stale SENGAJA ikut dikirim: frontend merendernya sebagai edge
+      // merah putus-putus agar operator tahu link terakhir yang diketahui,
+      // bukan kehilangan informasi saat satu siklus discovery gagal.
       const r = await db.query(
         `SELECT id, source_device_id, source_interface, target_chassis_id, target_sys_name,
                 target_port_id, target_port_desc, target_ip, manual_ipv4, target_device_id, protocol,
                 last_seen, stale
          FROM device_links
-         WHERE stale = false
          ORDER BY id ASC`
       );
       links = r.rows;
     } else {
       const store = db.getMemoryStore();
-      links = (store.device_links || []).filter(l => !l.stale);
+      links = (store.device_links || []);
     }
 
     // Build nodes for Vis.js
@@ -1330,7 +1411,8 @@ router.get('/topology', async (req, res) => {
           target_port_desc: link.target_port_desc,
           target_sys_name: link.target_sys_name,
           target_ip: link.target_ip,
-          last_seen: link.last_seen
+          last_seen: link.last_seen,
+          stale: link.stale === true
         });
       } else {
         // Unmanaged device — create pseudo-node keyed by chassis_id or sysName
@@ -1379,10 +1461,17 @@ router.get('/topology', async (req, res) => {
           target_sys_name: link.target_sys_name,
           target_ip: link.target_ip,
           last_seen: link.last_seen,
+          stale: link.stale === true,
           color: '#64748b',
           dashes: true
         });
       }
+    }
+
+    // Tandai node unmanaged yang SELURUH link-nya stale → frontend render redup.
+    for (const node of unmanagedNodes.values()) {
+      const nodeEdges = edges.filter(e => e.to === node.id);
+      node.stale = nodeEdges.length > 0 && nodeEdges.every(e => e.stale === true);
     }
 
     // Combine managed + unmanaged nodes
@@ -1398,6 +1487,8 @@ router.get('/topology', async (req, res) => {
         offline: devices.filter(d => d.status === 'offline').length,
         warning: devices.filter(d => d.status === 'warning').length,
         total_links: edges.length,
+        fresh_links: edges.filter(e => !e.stale).length,
+        stale_links: edges.filter(e => e.stale).length,
         unmanaged_nodes: unmanagedNodes.size,
         by_protocol: edges.reduce((acc, e) => {
           acc[e.protocol] = (acc[e.protocol] || 0) + 1;
@@ -1411,13 +1502,29 @@ router.get('/topology', async (req, res) => {
   }
 });
 
-// POST /api/topology/discover — manual trigger discovery
+// POST /api/topology/discover — manual trigger discovery (tombol "Rescan")
+// Non-destruktif: link yang tak terlihat kembali menjadi stale (merah), tidak dihapus.
 router.post('/topology/discover', async (req, res) => {
   try {
     const result = await topologyDiscovery.discoverTopology();
     res.json({
       success: true,
       message: 'Topology discovery completed',
+      ...result
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// POST /api/topology/reset — tombol "Reset & Rescan": hapus SEMUA link lalu
+// discovery dari nol. Override manual IPv4 dipertahankan (snapshot + restore).
+router.post('/topology/reset', async (req, res) => {
+  try {
+    const result = await topologyDiscovery.resetTopology();
+    res.json({
+      success: true,
+      message: `Reset selesai: ${result.removed} link dihapus, ${(result.discovery && result.discovery.totalLinks) || 0} link ditemukan, ${result.overrides_restored}/${result.overrides_preserved} override manual dipulihkan.`,
       ...result
     });
   } catch (err) {

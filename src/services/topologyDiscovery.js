@@ -632,7 +632,7 @@ async function persistLink(link) {
       target_port_id, target_port_desc, target_ip, target_device_id,
       protocol, discovered_at, last_seen, stale
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW(), false)
-    ON CONFLICT (source_device_id, source_interface, target_chassis_id)
+    ON CONFLICT (source_device_id, source_interface, (COALESCE(target_chassis_id, '')))
     DO UPDATE SET
       target_sys_name = EXCLUDED.target_sys_name,
       target_port_id = EXCLUDED.target_port_id,
@@ -681,6 +681,16 @@ async function discoverTopology() {
     return { skipped: true };
   }
   isRunning = true;
+  try {
+    return await runDiscovery();
+  } finally {
+    // Selalu dilepas. Bila discovery throw di tengah, siklus berikutnya
+    // (termasuk tombol Rescan / Reset & Rescan) tetap bisa berjalan.
+    isRunning = false;
+  }
+}
+
+async function runDiscovery() {
   const startTime = Date.now();
 
   console.log('[TopologyDiscovery] Starting topology discovery...');
@@ -690,13 +700,11 @@ async function discoverTopology() {
     allDevices = await getAllDevices();
   } catch (e) {
     console.error('[TopologyDiscovery] Failed to load devices:', e.message);
-    isRunning = false;
     return { error: e.message };
   }
 
   if (allDevices.length === 0) {
     console.log('[TopologyDiscovery] No devices registered, skipping');
-    isRunning = false;
     return { totalLinks: 0, message: 'no devices' };
   }
 
@@ -875,8 +883,71 @@ async function discoverTopology() {
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
   console.log(`[TopologyDiscovery] Discovery complete in ${elapsed}s — ${stats.lldp} LLDP, ${stats.cdp} CDP links, ${errors.length} errors`);
 
-  isRunning = false;
   return { totalLinks: allLinks.length, stats, errors, elapsed };
+}
+
+/**
+ * Reset total: hapus SEMUA device_links lalu discovery dari nol.
+ * Override manual IPv4 di-snapshot dulu dan dipasang ulang setelah rediscovery
+ * supaya kerja admin tidak hilang saat pembersihan hantu (link stale).
+ */
+async function resetTopology() {
+  let overrides = [];
+  let removed = 0;
+
+  if (db.isPostgresConnected()) {
+    const r = await db.query(
+      `SELECT source_device_id, source_interface, target_chassis_id, manual_ipv4
+         FROM device_links
+        WHERE manual_ipv4 IS NOT NULL AND target_chassis_id IS NOT NULL`
+    );
+    overrides = r.rows;
+    const d = await db.query('DELETE FROM device_links');
+    removed = d.rowCount || 0;
+  } else {
+    const store = db.getMemoryStore();
+    const all = store.device_links || [];
+    overrides = all
+      .filter(l => l.manual_ipv4 && l.target_chassis_id)
+      .map(l => ({
+        source_device_id: l.source_device_id,
+        source_interface: l.source_interface,
+        target_chassis_id: l.target_chassis_id,
+        manual_ipv4: l.manual_ipv4
+      }));
+    removed = all.length;
+    store.device_links = [];
+  }
+
+  const discovery = await discoverTopology();
+
+  let restored = 0;
+  for (const o of overrides) {
+    if (db.isPostgresConnected()) {
+      const u = await db.query(
+        `UPDATE device_links SET manual_ipv4 = $1
+          WHERE source_device_id = $2 AND source_interface = $3 AND target_chassis_id = $4`,
+        [o.manual_ipv4, o.source_device_id, o.source_interface, o.target_chassis_id]
+      );
+      restored += u.rowCount || 0;
+    } else {
+      const store = db.getMemoryStore();
+      const l = (store.device_links || []).find(x =>
+        x.source_device_id === o.source_device_id &&
+        x.source_interface === o.source_interface &&
+        x.target_chassis_id === o.target_chassis_id);
+      if (l) { l.manual_ipv4 = o.manual_ipv4; restored++; }
+    }
+  }
+
+  console.log(`[TopologyDiscovery] Reset complete: ${removed} link dihapus, ${discovery.totalLinks || 0} ditemukan, ${restored}/${overrides.length} override manual dipulihkan.`);
+
+  return {
+    removed,
+    overrides_preserved: overrides.length,
+    overrides_restored: restored,
+    discovery
+  };
 }
 
 /**
@@ -910,6 +981,7 @@ function stop() {
 module.exports = {
   init,
   discoverTopology,
+  resetTopology,
   scheduleDiscovery,
   stop,
   snmpWalk,

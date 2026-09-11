@@ -2964,8 +2964,10 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
               <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#f59e0b; margin-right:4px;"></span>Warning</span>
               <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#ef4444; margin-right:4px;"></span>Offline</span>
               <span><span style="display:inline-block; width:10px; height:10px; border:2px dashed #64748b; background:transparent; margin-right:4px;"></span>Unmanaged</span>
+              <span><span style="display:inline-block; width:16px; height:0; border-top:2px dashed #ef4444; vertical-align:middle; margin-right:4px;"></span>Terputus</span>
             </div>
-            <button class="btn-secondary" id="btn-topology-rescan" style="font-size:0.75rem;">Rescan</button>
+            <button class="btn-secondary" id="btn-topology-rescan" style="font-size:0.75rem;" title="Scan ulang kondisi device & cari LLDP baru. Link yang tak terlihat tetap tampil merah.">Rescan</button>
+            <button class="btn-secondary btn-danger" id="btn-topology-reset" style="font-size:0.75rem;" title="Hapus SEMUA link lalu discovery dari nol. Override manual IPv4 dipertahankan.">Reset &amp; Rescan</button>
           </div>
         </div>
         <div id="topology-canvas" style="width:100%; height:600px; border:1px solid var(--border-subtle); border-radius:8px; background:var(--bg-base); position:relative;">
@@ -2979,10 +2981,12 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
     `;
     // Load topology after DOM is ready
     setTimeout(() => loadTopology(), 50);
-    // Wire rescan button
+    // Wire rescan + reset buttons
     setTimeout(() => {
       const rescanBtn = document.getElementById('btn-topology-rescan');
       if (rescanBtn) rescanBtn.addEventListener('click', handleRescanTopology);
+      const resetBtn = document.getElementById('btn-topology-reset');
+      if (resetBtn) resetBtn.addEventListener('click', handleResetTopology);
     }, 60);
   } else if (view === 'alerts') {
     titleEl.textContent = 'Incident Auditing & Alarm Center';
@@ -3194,6 +3198,30 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
     loadTelegrafStatus();
     // Load InfluxDB connectivity status
     loadInfluxStatus();
+  } else if (view === 'readiness') {
+    titleEl.textContent = 'Configuration Readiness';
+    subtitleEl.textContent = 'Pre-flight diagnostics & auto-generated configuration commands';
+    container.innerHTML = `
+      <div class="readiness-view-container">
+        <div class="readiness-header-card">
+          <h3>Select Device to Scan</h3>
+          <select id="readiness-device-select" class="form-control readiness-select">
+            <option value="">-- Choose a device --</option>
+            ${state.devices.map(d => '<option value="' + d.id + '">' + escapeHtml(d.name) + ' (' + d.ip_address + ')</option>').join('')}
+          </select>
+        </div>
+        <div id="readiness-results" class="readiness-results-area">
+          <div class="readiness-placeholder">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>
+            <p>Select a device above to run the Configuration Readiness scan.</p>
+            <span class="readiness-placeholder-note">Checks: Network · SNMP · Syslog</span>
+          </div>
+        </div>
+      </div>`;
+    setTimeout(() => {
+      const sel = document.getElementById('readiness-device-select');
+      if (sel) sel.addEventListener('change', () => loadReadinessView(parseInt(sel.value, 10)));
+    }, 0);
   } else if (view === 'activity') {
     titleEl.textContent = 'Activity Log';
     subtitleEl.textContent = 'Real-time device event stream from polling agents';
@@ -3740,6 +3768,220 @@ async function loadReportsData() {
 
 window.loadReportsData = loadReportsData;
 
+/* ==========================================================================
+   Configuration Readiness Advisor
+   ========================================================================== */
+
+async function loadReadinessView(deviceId) {
+  const resultsArea = document.getElementById('readiness-results');
+  if (!deviceId) {
+    resultsArea.innerHTML = '<div class="readiness-placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg><p>Select a device above to run the Configuration Readiness scan.</p><span class="readiness-placeholder-note">Checks: Network · SNMP · Syslog</span></div>';
+    return;
+  }
+  // Show loading state
+  resultsArea.innerHTML = `<div class="readiness-loading">
+    <div class="readiness-spinner"></div>
+    <p>Scanning device configuration readiness...</p>
+    <span class="readiness-placeholder-note">Running 5-layer diagnostics probe</span>
+  </div>`;
+
+  try {
+    const res = await fetch(`/api/devices/${deviceId}/readiness`).then(r => r.json());
+    if (!res.success) {
+      resultsArea.innerHTML = `<div class="readiness-error"><strong>Error:</strong> ${escapeHtml(res.error || 'Unknown error')}</div>`;
+      return;
+    }
+    renderReadinessData(resultsArea, res);
+  } catch (e) {
+    resultsArea.innerHTML = `<div class="readiness-error"><strong>Network Error:</strong> Unable to reach server</div>`;
+    console.error('Readiness fetch failed:', e);
+  }
+}
+
+function copyToClipboard(text, btnEl) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = btnEl.textContent;
+      btnEl.textContent = '✓ Copied';
+      btnEl.classList.add('copied');
+      setTimeout(() => { btnEl.textContent = orig; btnEl.classList.remove('copied'); }, 1500);
+    }).catch(() => fallbackCopy(text, btnEl));
+  } else {
+    fallbackCopy(text, btnEl);
+  }
+}
+
+function fallbackCopy(text, btnEl) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); btnEl.textContent = '✓ Copied'; btnEl.classList.add('copied'); }
+  catch (e) { btnEl.textContent = '✗ Failed'; }
+  setTimeout(() => { btnEl.textContent = '📋 Copy'; btnEl.classList.remove('copied'); }, 1500);
+  document.body.removeChild(ta);
+}
+
+function renderReadinessData(container, data) {
+  const checks = data.checks || {};
+  const gaps = data.gaps || [];
+  const recs = data.recommendations || [];
+  const totalLayers = 3;
+  const passedLayers = Object.values(checks).filter(c => c.ok).length;
+  const progressPct = Math.round((passedLayers / totalLayers) * 100);
+
+  // Layer check icons & labels — hanya 3 layer wajib
+  const lg = checks.syslog || {};
+  let syslogDesc;
+  if (lg.ok) {
+    const when = lg.lastLogAt ? formatTimeAgo(new Date(lg.lastLogAt)) : 'baru saja';
+    syslogDesc = `OK • ${lg.logCount || 0} log • terakhir ${when}` + (lg.lastLogSourceIp ? ` dari ${lg.lastLogSourceIp}` : '');
+  } else {
+    syslogDesc = lg.note || 'Belum ada log diterima';
+  }
+  const layerMeta = [
+    { key: 'ping', label: 'Network Reachable', icon: '⊕', desc: checks.ping?.ok ? `OK (${checks.ping.latency_ms != null ? checks.ping.latency_ms + 'ms' : 'reachable'})` : (checks.ping?.error === 'unreachable' ? 'Unreachable' : (checks.ping?.error === 'no_ip_address' ? 'No IP Address' : 'Failed')) },
+    { key: 'snmp', label: 'SNMP Polling', icon: '◈', desc: checks.snmp?.ok ? `OK (${checks.snmp.interfaceCount || '?'} interfaces found)` : (checks.snmp?.error === 'snmp_disabled_or_bad_community' ? 'Not responding / bad community' : 'Failed') },
+    { key: 'syslog', label: 'Syslog Forwarding', icon: '⇪', desc: syslogDesc }
+  ];
+
+  container.innerHTML = `
+    <!-- Progress Header -->
+    <div class="readiness-progress-header">
+      <div class="readiness-progress-ring" id="readiness-progress-ring">
+        <svg viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r="50" fill="none" stroke="var(--border-subtle)" stroke-width="8"/>
+          <circle cx="60" cy="60" r="50" fill="none" stroke="${progressPct >= 80 ? 'var(--color-online)' : progressPct >= 40 ? 'var(--color-warning)' : 'var(--color-offline)'}" stroke-width="8"
+            stroke-dasharray="${2 * Math.PI * 50}" stroke-dashoffset="${2 * Math.PI * 50 * (1 - progressPct / 100)}"
+            transform="rotate(-90 60 60)" stroke-linecap="round"/>
+        </svg>
+        <span class="readiness-progress-label">${progressPct}%</span>
+      </div>
+      <div class="readiness-summary-text">
+        <h3>${passedLayers} of ${totalLayers} layers ready</h3>
+        <p>${gaps.length > 0
+          ? `${gaps.length} configuration gap${gaps.length > 1 ? 's' : ''} detected — see commands below`
+          : 'All systems fully configured for monitoring.'}</p>
+      </div>
+    </div>
+
+    <!-- Layer Checks Grid -->
+    <div class="readiness-layers-grid">
+      ${layerMeta.map(l => `
+        <div class="readiness-layer-card ${checks[l.key]?.ok ? 'passed' : 'pending'}" data-layer="${l.key}">
+          <div class="readiness-layer-icon ${checks[l.key]?.ok ? 'online' : 'warning'}">
+            ${checks[l.key]?.ok ? '✓' : l.icon}
+          </div>
+          <div class="readiness-layer-info">
+            <div class="readiness-layer-name">${l.label}</div>
+            <div class="readiness-layer-status">${escapeHtml(l.desc)}</div>
+          </div>
+          ${l.key === 'syslog' && !checks.syslog?.ok ? `<button class="readiness-verify-btn" data-verify-device="${data.device_id}">Verify</button>` : ''}
+        </div>
+      `).join('')}
+    </div>
+
+    <!-- Recommendations Section -->
+    ${recs.length > 0 ? `
+      <div class="readiness-recommendations">
+        <h4>Recommended Configuration Commands</h4>
+        ${recs.map((rec, i) => `
+          <details class="readiness-rec-panel ${rec.urgency === 'high' ? 'urgent' : rec.urgency === 'medium' ? 'moderate' : ''}">
+            <summary class="readiness-rec-header">
+              <span class="readiness-rec-badge urgency-${rec.urgency}">${rec.urgency.toUpperCase()}</span>
+              <span class="readiness-rec-title">${escapeHtml(rec.label)}</span>
+              <span class="readiness-rec-chevron">▾</span>
+            </summary>
+            <div class="readiness-rec-body">
+              <p class="readiness-rec-desc">${escapeHtml(rec.description)}</p>
+              <div class="readiness-cmd-block">
+                ${rec.commands.map((cmd, ci) => {
+                  const isComment = cmd.trim().startsWith('#');
+                  return `<div class="readiness-cmd-line ${isComment ? 'comment' : 'command'}">${escapeHtml(cmd)}</div>`;
+                }).join('')}
+                <button class="readiness-copy-btn" onclick='copyToClipboard(${JSON.stringify(rec.commands.join('\n').replace(/\\/g, '\\\\').replace(/'/g, "\\'"))}, this)'>📋 Copy All</button>
+              </div>
+            </div>
+          </details>
+        `).join('')}
+      </div>
+    ` : '<div class="readiness-ok-message"><p>✅ No additional configuration needed. Your device is fully ready for monitoring.</p></div>'}
+
+    <!-- Metadata Footer -->
+    <div class="readiness-metadata">
+      <span>Checed at: ${new Date(data.checked_at || Date.now()).toLocaleString('id-ID', { hour12: false })}</span>
+      <span>Elapsed: ${data.elapsed_ms || '?'}ms</span>
+      <span>Device: ${escapeHtml(data.device_name)} (${data.device_ip})</span>
+    </div>`;
+
+  // Tombol Verify pada layer Syslog → verifikasi aktif (menunggu log baru).
+  const vbtn = container.querySelector('.readiness-verify-btn');
+  if (vbtn) {
+    vbtn.addEventListener('click', () => verifySyslog(parseInt(vbtn.dataset.verifyDevice, 10), vbtn));
+  }
+}
+
+/**
+ * Verifikasi AKTIF syslog: catat cursor log terbaru, minta user menjalankan
+ * `/log warning "BMS-TEST"` di perangkat, lalu tunggu log BARU masuk.
+ * Ini satu-satunya cara pasti membedakan "dikonfigurasi tapi idle" dari
+ * "konfigurasi sudah dihapus".
+ */
+async function verifySyslog(deviceId, btnEl) {
+  const card = btnEl ? btnEl.closest('.readiness-layer-card') : null;
+  const statusEl = card ? card.querySelector('.readiness-layer-status') : null;
+  const setBtn = (text, disabled) => {
+    if (!btnEl) return;
+    btnEl.textContent = text;
+    btnEl.disabled = !!disabled;
+  };
+
+  setBtn('Menyiapkan…', true);
+  let info = null;
+  try {
+    const st = await fetch(`/api/devices/${deviceId}/syslog-status`).then(r => r.json());
+    if (!st.success) throw new Error(st.error || 'status gagal');
+    const cursorId = st.cursorId || 0;
+
+    info = document.createElement('div');
+    info.className = 'readiness-verify-info';
+    info.innerHTML = 'Jalankan di perangkat:<br><code>/log warning "BMS-TEST"</code><br><small>Menunggu log masuk… (maks 45s)</small>';
+    if (card) card.appendChild(info);
+    setBtn('Menunggu…', true);
+    const v = await fetch(`/api/devices/${deviceId}/syslog-verify?sinceId=${cursorId}&timeout=45000`).then(r => r.json());
+    if (info) { info.remove(); info = null; }
+
+    if (v.success && v.received && v.log) {
+      if (card) {
+        card.classList.remove('pending');
+        card.classList.add('passed');
+        const icon = card.querySelector('.readiness-layer-icon');
+        if (icon) { icon.classList.remove('warning'); icon.classList.add('online'); icon.textContent = '✓'; }
+        if (statusEl) {
+          const when = v.log.receivedAt ? formatTimeAgo(new Date(v.log.receivedAt)) : 'baru saja';
+          statusEl.textContent = `OK • log diterima ${when}` + (v.log.sourceIp ? ` dari ${v.log.sourceIp}` : '');
+        }
+      }
+      setBtn('✓ Terverifikasi', true);
+      setTimeout(() => loadReadinessView(deviceId), 1200);
+    } else {
+      setBtn('Coba Lagi', false);
+      if (statusEl) {
+        statusEl.textContent = 'Tidak ada log masuk dalam 45s — cek: (1) rule topics mencakup topik pesan (warning/error/script, bukan hanya info), (2) action target=remote + remote + remote-port, (3) firewall mengizinkan UDP/TCP 5514.';
+      }
+    }
+  } catch (e) {
+    if (info) info.remove();
+    setBtn('Coba Lagi', false);
+    if (statusEl) statusEl.textContent = 'Verifikasi gagal: ' + (e.message || 'error');
+  }
+}
+
+window.loadReadinessView = loadReadinessView;
+window.verifySyslog = verifySyslog;
+
 /**
  * Topology (LLDP/CDP) functions
  * ============================================================================
@@ -3771,7 +4013,8 @@ async function loadTopology(forceRecreate = false) {
     const byProto = s.by_protocol || {};
     const protoStr = Object.keys(byProto).map(k => `${k.toUpperCase()}: ${byProto[k]}`).join(' · ') || 'no links';
     if (statsEl) {
-      statsEl.innerHTML = `<span style="color:var(--text-primary); font-weight:600;">${s.total_devices} devices</span> · ${s.total_links} links (${protoStr})` +
+      statsEl.innerHTML = `<span style="color:var(--text-primary); font-weight:600;">${s.total_devices} devices</span> · ${s.fresh_links || 0} link (${protoStr})` +
+        (s.stale_links > 0 ? ` · <span style="color:#ef4444; font-weight:600;">${s.stale_links} terputus</span>` : '') +
         (s.unmanaged_nodes > 0 ? ` · <span style="color:#f59e0b;">${s.unmanaged_nodes} unmanaged</span>` : '');
     }
 
@@ -3780,7 +4023,7 @@ async function loadTopology(forceRecreate = false) {
       if (s.total_devices === 0) {
         emptyEl.style.display = 'flex';
         emptyEl.querySelector('div').textContent = 'No devices registered yet.';
-      } else if (s.total_links === 0) {
+      } else if ((s.total_links || 0) === 0) {
         emptyEl.style.display = 'flex';
         emptyEl.querySelector('div').textContent = 'No topology data yet';
         emptyEl.querySelectorAll('div')[1].textContent = 'Click Rescan to discover LLDP/CDP neighbors from your devices.';
@@ -3817,37 +4060,49 @@ function renderTopologyGraph(data) {
   // Convert API nodes to Vis.js DataSet format
   const visNodes = data.nodes.map(n => {
     const isUnmanaged = (n.type === 'unmanaged') || (typeof n.id === 'string' && String(n.id).startsWith('unmanaged-'));
+    const staleNode = n.stale === true;
     return {
       id: n.id,
       label: n.label + (n.ip ? '\n' + n.ip : ''),
       color: {
-        background: n.color || '#64748b',
-        border: isUnmanaged ? '#94a3b8' : (n.color || '#64748b'),
+        background: staleNode ? 'rgba(239,68,68,0.10)' : (n.color || '#64748b'),
+        border: staleNode ? '#ef4444' : (isUnmanaged ? '#94a3b8' : (n.color || '#64748b')),
         highlight: { background: n.color || '#64748b', border: '#ffffff' }
       },
       shape: isUnmanaged ? 'box' : 'dot',
       size: isUnmanaged ? 18 : 22,
-      font: { color: '#f8fafc', size: 11, face: 'Inter, sans-serif', multi: true },
+      font: { color: staleNode ? '#ef4444' : '#f8fafc', size: 11, face: 'Inter, sans-serif', multi: true },
       borderWidth: isUnmanaged ? 2 : 1,
       borderDashes: isUnmanaged ? [4, 4] : false,
       title: isUnmanaged
-        ? `Unmanaged device\nHostname: ${n.label}\nIP: ${n.ip || 'unknown'}\nClick to add this device`
+        ? `Unmanaged device${staleNode ? '\n⚠ TERPUTUS (tidak terlihat di discovery terakhir)' : ''}\nHostname: ${n.label}\nIP: ${n.ip || 'unknown'}\nClick to add this device`
         : `Device: ${n.label}\nIP: ${n.ip}\nStatus: ${n.status}\nType: ${n.type}\nClick to view details`
     };
   });
 
-  const visEdges = data.edges.map(e => ({
-    id: e.id,
-    from: e.from,
-    to: e.to,
-    color: e.color ? { color: e.color, highlight: '#2596BE' } : { color: '#475569', highlight: '#2596BE' },
-    dashes: e.dashes || false,
-    arrows: { to: { enabled: true, scaleFactor: 0.4 } },
-    width: 1.5,
-    smooth: { enabled: true, type: 'curvedCW', roundness: 0.15 },
-    font: { color: '#94a3b8', size: 9, strokeWidth: 0, align: 'middle' },
-    title: `${e.protocol ? e.protocol.toUpperCase() : 'Link'}\n${e.target_sys_name ? `Target: ${e.target_sys_name}` : ''}\n${e.target_port_desc ? `Port: ${e.target_port_desc}` : e.target_interface ? `Port: ${e.target_interface}` : ''}\n${e.target_ip ? `IP: ${e.target_ip}` : ''}`
-  }));
+  const visEdges = data.edges.map(e => {
+    const stale = e.stale === true;
+    const baseColor = e.color || '#475569';
+    return {
+      id: e.id,
+      from: e.from,
+      to: e.to,
+      color: {
+        color: stale ? '#ef4444' : baseColor,
+        highlight: stale ? '#ef4444' : '#2596BE'
+      },
+      dashes: stale ? [6, 4] : (e.dashes || false),
+      arrows: { to: { enabled: true, scaleFactor: 0.4 } },
+      width: stale ? 2 : 1.5,
+      smooth: { enabled: true, type: 'curvedCW', roundness: 0.15 },
+      font: { color: '#94a3b8', size: 9, strokeWidth: 0, align: 'middle' },
+      title: `${stale ? '⚠ TERPUTUS\n' : ''}${e.protocol ? e.protocol.toUpperCase() : 'Link'}`
+        + `${e.target_sys_name ? `\nTarget: ${e.target_sys_name}` : ''}`
+        + `${e.target_port_desc || e.target_interface ? `\nPort: ${e.target_port_desc || e.target_interface}` : ''}`
+        + `${e.target_ip ? `\nIP: ${e.target_ip}` : ''}`
+        + `${stale && e.last_seen ? `\nTerakhir terlihat: ${formatTimeAgo(new Date(e.last_seen))}` : ''}`
+    };
+  });
 
   if (state.topologyNetwork) {
     // Update existing network
@@ -4026,8 +4281,46 @@ async function handleRescanTopology() {
   }
 }
 
+/**
+ * Reset & Rescan — hapus SEMUA link topology lalu discovery dari nol.
+ * Berbeda dari Rescan (non-destruktif): ini membersihkan hantu merah.
+ * Override manual IPv4 dipertahankan oleh backend (snapshot + restore).
+ */
+async function handleResetTopology() {
+  if (!confirm('Reset & Rescan akan MENGHAPUS semua link topology, lalu melakukan discovery ulang dari nol.\n\nOverride manual IPv4 tetap dipertahankan.\n\nLanjutkan?')) return;
+
+  const btn = document.getElementById('btn-topology-reset');
+  const statsEl = document.getElementById('topology-stats-text');
+  const originalText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Mereset…'; btn.style.opacity = '0.6'; }
+  if (statsEl) { statsEl.textContent = 'Reset total + discovery ulang…'; statsEl.style.color = ''; }
+
+  try {
+    const res = await fetch('/api/topology/reset', { method: 'POST' }).then(r => r.json());
+    if (statsEl) {
+      statsEl.textContent = res.success ? `✓ ${res.message}` : `✗ Reset gagal: ${res.error || 'unknown'}`;
+      statsEl.style.color = res.success ? 'var(--color-online)' : 'var(--color-offline)';
+    }
+    if (res.success) {
+      // Rebuild total: network lama dibuang agar tidak ada node/edge sisa.
+      await loadTopology(true);
+      setTimeout(() => { if (statsEl) statsEl.style.color = ''; }, 3000);
+    }
+  } catch (e) {
+    if (statsEl) {
+      statsEl.textContent = '✗ Error: ' + e.message;
+      statsEl.style.color = 'var(--color-offline)';
+    }
+  } finally {
+    setTimeout(() => {
+      if (btn) { btn.disabled = false; btn.textContent = originalText; btn.style.opacity = ''; }
+    }, 2000);
+  }
+}
+
 window.loadTopology = loadTopology;
 window.handleRescanTopology = handleRescanTopology;
+window.handleResetTopology = handleResetTopology;
 window.openAddDevicePrefilled = openAddDevicePrefilled;
 
 /**

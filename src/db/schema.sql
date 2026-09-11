@@ -144,4 +144,28 @@ CREATE INDEX IF NOT EXISTS idx_links_last_seen ON device_links(last_seen);
 
 COMMENT ON TABLE device_links IS 'Network topology edges discovered via LLDP/CDP/MNDP';
 COMMENT ON COLUMN device_links.target_device_id IS 'NULL jika neighbor belum di-add ke devices table (unmanaged)';
-COMMENT ON COLUMN device_links.stale IS 'true jika link tidak muncul di discovery terakhir (auto-cleanup 7 hari)';
+COMMENT ON COLUMN device_links.stale IS 'true jika link tidak muncul di discovery terakhir; tetap tampil (merah) sampai admin Reset & Rescan';
+
+-- =============================================================
+-- Migrations (idempotent)
+-- -------------------------------------------------------------
+-- CREATE TABLE IF NOT EXISTS tidak menambah kolom ke tabel yang
+-- sudah ada. Statement di bawah memastikan database lama ikut
+-- ter-upgrade tanpa perlu drop/recreate.
+-- =============================================================
+ALTER TABLE device_links ADD COLUMN IF NOT EXISTS manual_ipv4 TEXT NULL;
+
+-- CDP menulis target_chassis_id = NULL. Constraint UNIQUE biasa memperlakukan
+-- NULL sebagai distinct, sehingga ON CONFLICT tidak pernah match dan baris
+-- duplikat menumpuk tiap siklus. Ganti ke unique EXPRESSION index yang
+-- menormalkan NULL menjadi '' lebih dulu.
+DELETE FROM device_links a USING device_links b
+ WHERE a.id < b.id
+   AND a.source_device_id = b.source_device_id
+   AND a.source_interface IS NOT DISTINCT FROM b.source_interface
+   AND COALESCE(a.target_chassis_id, '') = COALESCE(b.target_chassis_id, '');
+
+ALTER TABLE device_links DROP CONSTRAINT IF EXISTS unique_link;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_device_link_key
+  ON device_links (source_device_id, source_interface, COALESCE(target_chassis_id, ''));
