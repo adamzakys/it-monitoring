@@ -17,3 +17,9 @@ ep-link panels, device intelligence centers) must use solid, opaque backgrounds 
 - Prefers Lucide as the icon library when picking icons, for consistency with the existing inline SVGs. Confidence: 0.7
 - Prefers the app to remember the last active menu/view across a page reload (e.g. staying on Readiness instead of snapping back to Dashboard) — the active view should be persisted and restored on init. Confidence: 0.8
 - Every UI change must preserve responsive compatibility across desktop, tablet, and mobile. Confidence: 0.6
+- Dislikes wide cards that waste horizontal space: prefers consolidating related panels into a single card split into semantic columns (e.g. merging "Incidents & Activity" and "Threat Timeline" into one two-column card) instead of leaving separate cards under utilizing the grid width. Confidence: 0.6
+- List/table rows (e.g. Device Log) must have visible separator lines between entries — relying only on hover highlight or gap spacing is confusing ("gaada garisnya jadi agak bingung"). Confidence: 0.7
+- When multiple sections live inside one container, each section must be visually distinct with clear, perceivable boundaries — distinct surfaces (background/border/radius/padding per panel), column dividers, and section-heading markers — rather than blending into the shared card background. Subtle separation that is barely perceptible is not acceptable. Confidence: 0.75
+
+- Wants a shared ecosystem-wide design system: every app in the same product family must follow one visual language — identical tokens, radius scale, typography, color meanings, motion, and component signatures — with per-app variation limited to product name, logo, nav items, and KPI meanings. Confidence: 0.8
+- UI/navigation labels stay in English (Dashboard, Devices, Alerts, Online, Offline), while explanatory copy — empty states, technical reasons, tooltips, error messages — is written in Bahasa Indonesia. Confidence: 0.6

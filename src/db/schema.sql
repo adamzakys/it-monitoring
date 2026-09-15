@@ -169,3 +169,53 @@ ALTER TABLE device_links DROP CONSTRAINT IF EXISTS unique_link;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_device_link_key
   ON device_links (source_device_id, source_interface, COALESCE(target_chassis_id, ''));
+
+
+-- =============================================================
+-- BMS Threat Timeline — korelasi log menjadi incident bersesi
+-- -------------------------------------------------------------
+-- Dipisahkan dari tabel `incidents` (milik health engine: satu kondisi
+-- kesehatan aktif per device, dan createIncident menolak incident baru
+-- selama masih ada yang active). Threat Timeline mengelompokkan
+-- device_logs menjadi sesi korelasi, sehingga satu device boleh punya
+-- beberapa sesi berbeda dalam waktu yang sama.
+--
+-- Aditif & idempotent: aman dijalankan pada database production yang
+-- sudah berisi data (initDB menjalankan schema.sql tiap startup).
+-- =============================================================
+ALTER TABLE device_logs ADD COLUMN IF NOT EXISTS topics TEXT;
+ALTER TABLE device_logs ADD COLUMN IF NOT EXISTS category VARCHAR(40);
+ALTER TABLE device_logs ADD COLUMN IF NOT EXISTS threat_key TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_device_logs_threat ON device_logs (threat_key, id);
+CREATE INDEX IF NOT EXISTS idx_device_logs_dev_time ON device_logs (device_id, received_at DESC);
+
+CREATE TABLE IF NOT EXISTS threat_incidents (
+    threat_key      TEXT PRIMARY KEY,
+    device_id       INTEGER REFERENCES devices(id) ON DELETE CASCADE,
+    device_name     VARCHAR(100),
+    title           VARCHAR(200) NOT NULL,
+    severity        VARCHAR(20) DEFAULT 'warning',
+    status          VARCHAR(20) DEFAULT 'open',
+    category        VARCHAR(40),
+    topics          TEXT,
+    matched_rules   JSONB DEFAULT '[]'::jsonb,
+    started_at      TIMESTAMPTZ DEFAULT NOW(),
+    last_event_at   TIMESTAMPTZ DEFAULT NOW(),
+    event_count     INTEGER DEFAULT 0,
+    first_log_id    BIGINT,
+    last_log_id     BIGINT,
+    acked_at        TIMESTAMPTZ,
+    acked_by        VARCHAR(100),
+    resolved_at     TIMESTAMPTZ,
+    auto_resolved   BOOLEAN DEFAULT FALSE,
+    evidence        JSONB DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_threat_status ON threat_incidents (status, last_event_at DESC);
+CREATE INDEX IF NOT EXISTS idx_threat_device ON threat_incidents (device_id, started_at DESC);
+
+COMMENT ON TABLE threat_incidents IS 'Sesi korelasi log — Threat Timeline (terpisah dari incidents: health engine)';
+COMMENT ON COLUMN device_logs.threat_key IS 'Logical FK ke threat_incidents.threat_key. NULL = event individual tanpa rule (tetap ditampilkan)';
+COMMENT ON COLUMN device_logs.topics IS 'Topic asli perangkat apa adanya (mis. RouterOS: system,error,critical), dipisah koma';
+COMMENT ON COLUMN device_logs.category IS 'Kategori turunan vendor-agnostik dari topics+program+pola pesan (mis. auth, config, ntp, firewall)';

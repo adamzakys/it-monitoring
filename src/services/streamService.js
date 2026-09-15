@@ -344,7 +344,8 @@ async function realTimeSnmpPoll(device) {
  * Vendor-agnostic: generic HR works for Linux servers AND RouterOS ≥ 6.4x/7.x
  * (divalidasi runtime: device 18 CHR ROS 7.16 merespons hrProcessor/hrStorage).
  * Returns { has_data, sys_uptime_ticks, cpu_load_pct, memory_total_bytes,
- *           memory_used_bytes, storage_entries[], temperature_c, fetched_at }.
+ *           memory_used_bytes, memory_used_percent, storage_entries[],
+ *           temperature_c, fetched_at }.
  * storage_entries: { storage_type, descr, alloc_units, size, used } — size/used
  * dalam satuan alloc_units (semantik benar: size=kapasitas, used=terpakai).
  * OIDs adalah konstanta standar; hanya ip/community/port/version user-derived
@@ -358,7 +359,7 @@ async function getRealTimeSystemInfo(device) {
 
   const result = {
     has_data: false, sys_uptime_ticks: null, cpu_load_pct: null,
-    memory_total_bytes: null, memory_used_bytes: null,
+    memory_total_bytes: null, memory_used_bytes: null, memory_used_percent: null,
     storage_entries: [], temperature_c: null, fetched_at: new Date().toISOString()
   };
   if (!ip) return result;
@@ -424,16 +425,15 @@ async function getRealTimeSystemInfo(device) {
       result.storage_entries.push(r);
       result.has_data = true;
     }
-    // Memory = entri hrStorageRam (.1.3.6.1.2.1.25.2.1.2) atau deskripsi RAM.
-    const RAM_TYPE = '.1.3.6.1.2.1.25.2.1.2';
-    const ram = result.storage_entries.find(e => {
-      const d = (e.descr || '').trim().toLowerCase();
-      return e.storage_type === RAM_TYPE || d === 'main memory' || d === 'physical memory' ||
-        d === 'ram' || d === 'real memory' || d === 'system memory';
-    });
-    if (ram && ram.alloc_units > 0) {
-      result.memory_total_bytes = (ram.size || 0) * ram.alloc_units;
-      result.memory_used_bytes = (ram.used || 0) * ram.alloc_units;
+    // Memory runtime — semantik identik dengan jalur InfluxDB
+    // (influxService.computeHrStorageMemory): used = MemTotal - MemAvailable.
+    // hrStorageUsed "Physical memory" TIDAK dipakai karena = MemTotal - MemFree
+    // (sudah termasuk page cache) sehingga over-report vs free/fastfetch.
+    const memory = influxService.computeHrStorageMemory(result.storage_entries);
+    if (memory) {
+      result.memory_total_bytes = memory.total_bytes;
+      result.memory_used_bytes = memory.used_bytes;
+      result.memory_used_percent = memory.used_percent;
     }
   }
 
@@ -790,6 +790,25 @@ function broadcastToDevice(deviceId, payload) {
   }
 }
 
+/**
+ * Broadcast pembaruan Threat Timeline ke client yang subscribe ke device tsb.
+ * Aditif: tipe pesan baru, cabang DEVICE_LOG di atas tidak diubah.
+ * `event` boleh null (mis. saat sesi ditutup oleh auto-resolve).
+ */
+function broadcastThreatIncident(deviceId, payload) {
+  if (!wss) return;
+  const msg = JSON.stringify({
+    type: 'THREAT_INCIDENT_UPDATED',
+    incident: payload && payload.incident ? payload.incident : null,
+    event: payload && payload.event ? payload.event : null
+  });
+  for (const [ws, sub] of clientSubscriptions.entries()) {
+    if (sub && sub.deviceId === deviceId && ws.readyState === ws.OPEN) {
+      ws.send(msg);
+    }
+  }
+}
+
 module.exports = {
   initStreamService,
   broadcastNewAlert,
@@ -797,6 +816,7 @@ module.exports = {
   broadcastIncidentUpdated,
   broadcastIncidentResolved,
   broadcastToDevice,
+  broadcastThreatIncident,
   getRealTimeInterfaces,
   realTimeSnmpPoll,
   getRealTimeInterfaceMbps,

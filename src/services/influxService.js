@@ -442,6 +442,86 @@ async function getInterfaceThroughputRates(deviceId, minutes = 5) {
 }
 
 /**
+ * Tipe hrStorage (HOST-RESOURCES-MIB hrStorageType) — dipakai untuk
+ * mengklasifikasi tiap BARIS hrStorageTable.
+ */
+const HR_STORAGE_TYPE = {
+  OTHER: '.1.3.6.1.2.1.25.2.1.1',
+  RAM: '.1.3.6.1.2.1.25.2.1.2',
+  VIRTUAL: '.1.3.6.1.2.1.25.2.1.3',
+  FIXED_DISK: '.1.3.6.1.2.1.25.2.1.4'
+};
+
+/**
+ * Klasifikasi satu baris hrStorageTable.
+ *
+ * PENTING: storage_type TIDAK unik per baris — semua filesystem berbagi
+ * hrStorageFixedDisk (.25.2.1.4) dan semua pseudo-memory berbagi
+ * hrStorageOther (.25.2.1.1). Mengelompokkan berdasarkan storage_type
+ * (perilaku lama) menabrakkan mount "/" dengan "/run/user/*" dan menampilkan
+ * pseudo-memory sebagai storage. Klasifikasi harus per-baris (hrStorageIndex)
+ * + deskripsi.
+ *
+ * @returns {'memory'|'memory_available'|'memory_pseudo'|'swap'|'virtual_memory'|'mount'|'unknown'}
+ */
+function classifyHrStorageEntry(entry) {
+  const descr = String(entry.descr || '').trim().toLowerCase();
+  const type = String(entry.storage_type || '').trim();
+
+  if (type === HR_STORAGE_TYPE.RAM ||
+      /^(physical memory|main memory|real memory|system memory|ram)$/.test(descr)) {
+    return 'memory';
+  }
+  if (type === HR_STORAGE_TYPE.VIRTUAL) {
+    return /swap/.test(descr) ? 'swap' : 'virtual_memory';
+  }
+  if (type === HR_STORAGE_TYPE.OTHER) {
+    return /available/.test(descr) ? 'memory_available' : 'memory_pseudo';
+  }
+  if (type === HR_STORAGE_TYPE.FIXED_DISK) return 'mount';
+  return 'unknown';
+}
+
+/**
+ * Hitung memory runtime dari daftar baris hrStorage.
+ *
+ * `used` SENGAJA tidak diambil dari hrStorageUsed entri "Physical memory":
+ * pada net-snmp/Linux nilai itu = MemTotal - MemFree, yaitu SUDAH memasukkan
+ * page cache + buffers, sehingga selalu lebih besar dari `free`/fastfetch.
+ * Nilai runtime yang benar = MemTotal - MemAvailable, dan net-snmp melaporkan
+ * MemAvailable sebagai hrStorageSize pada entri pseudo "Available memory"
+ * (hrStorageOther, hrStorageUsed = 0). Field Cached/Buffers/Shared tidak
+ * dipakai dan tidak dijumlahkan.
+ *
+ * @returns {{total_bytes:number, used_bytes:number, used_percent:number}|null}
+ */
+function computeHrStorageMemory(entries) {
+  const list = entries || [];
+  const memoryEntry = list.find(e => classifyHrStorageEntry(e) === 'memory' && (e.alloc_units || 0) > 0);
+  if (!memoryEntry) return null;
+
+  const totalBytes = (memoryEntry.size || 0) * memoryEntry.alloc_units;
+  const availableEntry = list.find(e => classifyHrStorageEntry(e) === 'memory_available' && (e.alloc_units || 0) > 0);
+
+  let usedBytes;
+  if (availableEntry) {
+    const availUnits = (availableEntry.size || 0) > 0 ? availableEntry.size : (availableEntry.used || 0);
+    const availBytes = availUnits * availableEntry.alloc_units;
+    usedBytes = totalBytes >= availBytes
+      ? totalBytes - availBytes
+      : (memoryEntry.used || 0) * memoryEntry.alloc_units;
+  } else {
+    usedBytes = (memoryEntry.used || 0) * memoryEntry.alloc_units;
+  }
+
+  return {
+    total_bytes: totalBytes,
+    used_bytes: usedBytes,
+    used_percent: totalBytes > 0 ? parseFloat(((usedBytes / totalBytes) * 100).toFixed(1)) : 0
+  };
+}
+
+/**
  * Fetches system metrics from sysUpTime / hrProcessorLoad / hrStorage if available
  */
 async function getSystemMetrics(deviceId) {
@@ -450,12 +530,14 @@ async function getSystemMetrics(deviceId) {
 
   // Telegraf dapat menulis system metrics ke beberapa bentuk, tergantung
   // konfigurasi yang digenerate (name_override per-input vs name per-tabel):
-  //   1) measurement "system" (saat name_override dipakai) dgn field
-  //      uptime_ticks / cpu_load_pct / storage_* (label tertukar) DAN field
-  //      asli hrStorageUsed / hrStorageSize / hrStorageAllocationUnits.
+  //   1) measurement "system" (saat name_override dipakai) — berisi field
+  //      uptime_ticks / cpu_load_pct DAN seluruh kolom hrStorageTable dengan
+  //      nama OID kanoniknya (hrStorageAllocationUnits / hrStorageSize /
+  //      hrStorageUsed / hrStorageDescr / hrStorageType).
   //   2) measurement "system_cpu" / "system_storage" (konfigurasi lebih lama).
-  // Parser ini toleran terhadap SEMUA bentuk; label storage dinormalisasi ke
-  // semantik benar { size = kapasitas, used = terpakai, alloc_units }.
+  // Sumber kebenaran = field kanonik hrStorage* (hrStorageSize = kapasitas,
+  // hrStorageUsed = terpakai). Alias storage_size/storage_used TIDAK dipakai
+  // karena pada config lama keduanya tertukar (lihat telegrafManager).
   const fluxQuery = `
     from(bucket: "${bucket}")
       |> range(start: -5m)
@@ -463,19 +545,43 @@ async function getSystemMetrics(deviceId) {
       |> filter(fn: (r) => r["_measurement"] == "system"
                        or r["_measurement"] == "system_cpu"
                        or r["_measurement"] == "system_storage")
+      |> filter(fn: (r) => r["_field"] == "uptime_ticks"
+                       or r["_field"] == "cpu_load_pct"
+                       or r["_field"] == "hrStorageAllocationUnits"
+                       or r["_field"] == "hrStorageSize"
+                       or r["_field"] == "hrStorageUsed"
+                       or r["_field"] == "hrStorageDescr"
+                       or r["_field"] == "hrStorageType")
       |> last()
   `;
 
-  const result = { has_data: false, sys_uptime_ticks: null, cpu_load_pct: null, memory_used: null, memory_total: null, storage_entries: [], fetched_at: null };
-  const byType = new Map();
-  const entryFor = (storageType) => {
-    if (!storageType) return null;
-    if (!byType.has(storageType)) {
-      const e = { storage_type: storageType, descr: '', alloc_units: 0, size: 0, used: 0 };
-      byType.set(storageType, e);
+  const result = {
+    has_data: false, sys_uptime_ticks: null, cpu_load_pct: null,
+    memory_used: null, memory_total: null, memory_used_percent: null,
+    storage_entries: [], fetched_at: null
+  };
+  // Satu entri per BARIS hrStorageTable. Tag hrStorageIndex bersifat unik
+  // per baris; fallback ke (descr + type) untuk config lama tanpa index.
+  const byRow = new Map();
+  const entryFor = (o) => {
+    const idx = o.hrStorageIndex;
+    const key = (idx !== undefined && idx !== null && String(idx) !== '')
+      ? `idx:${idx}`
+      : `descr:${o.storage_descr || o.hrStorageDescr || ''}|${o.storage_type || o.hrStorageType || ''}`;
+    if (!byRow.has(key)) {
+      const e = {
+        storage_type: String(o.storage_type || o.hrStorageType || ''),
+        descr: String(o.storage_descr || o.hrStorageDescr || ''),
+        alloc_units: 0, size: 0, used: 0
+      };
+      byRow.set(key, e);
       result.storage_entries.push(e);
     }
-    return byType.get(storageType);
+    const e = byRow.get(key);
+    // Tag dapat datang pada baris yang berbeda dari field-nya.
+    if (!e.storage_type && o.storage_type) e.storage_type = String(o.storage_type);
+    if (!e.descr && o.storage_descr) e.descr = String(o.storage_descr);
+    return e;
   };
   try {
     await new Promise((resolve) => {
@@ -492,61 +598,39 @@ async function getSystemMetrics(deviceId) {
           if (o._field === 'cpu_load_pct') {
             result.cpu_load_pct = parseFloat(o._value) || 0;
           }
-          // --- Storage: normalisasi ke { size, used, alloc_units } ---
-          if (o._field === 'storage_alloc_units' || o._field === 'hrStorageAllocationUnits') {
-            const e = entryFor(o.storage_type);
-            if (e) e.alloc_units = parseInt(o._value, 10) || 0;
+          // --- Storage: field kanonik HOST-RESOURCES-MIB, per baris ---
+          // .4 = hrStorageAllocationUnits, .5 = hrStorageSize (kapasitas),
+          // .6 = hrStorageUsed (terpakai). Alias storage_* tidak dipakai.
+          if (o._field === 'hrStorageAllocationUnits') {
+            entryFor(o).alloc_units = parseInt(o._value, 10) || 0;
           }
           if (o._field === 'hrStorageSize') {
-            const e = entryFor(o.storage_type);
-            if (e) e.size = parseFloat(o._value) || 0;
+            entryFor(o).size = parseFloat(o._value) || 0;
           }
           if (o._field === 'hrStorageUsed') {
-            const e = entryFor(o.storage_type);
-            if (e) e.used = parseFloat(o._value) || 0;
+            entryFor(o).used = parseFloat(o._value) || 0;
           }
-          // Telegraf lama menukar label: storage_used = hrStorageSize (kapasitas),
-          // storage_size = hrStorageUsed (terpakai) → kembalikan ke semantik benar.
-          if (o._field === 'storage_used') {
-            const e = entryFor(o.storage_type);
-            if (e && !e.size) e.size = parseFloat(o._value) || 0;
+          if (o._field === 'hrStorageDescr' && o._value) {
+            entryFor(o).descr = String(o._value);
           }
-          if (o._field === 'storage_size') {
-            const e = entryFor(o.storage_type);
-            if (e && !e.used) e.used = parseFloat(o._value) || 0;
+          if (o._field === 'hrStorageType' && o._value) {
+            entryFor(o).storage_type = String(o._value);
           }
-          if (o._field === 'hrStorageDescr') {
-            const e = entryFor(o.storage_type);
-            if (e) e.descr = String(o._value || '');
-          }
-          if (o._field === 'storage_descr') {
-            const e = entryFor(o.storage_type);
-            if (e) e.descr = String(o._value || e.descr || '');
-          }
-          // storage_descr ditulis telegraf sebagai TAG (bukan field) —
-          // tetap dibaca lewat kolom tag row.
-          if (o.storage_type && o.storage_descr) {
-            const e = entryFor(o.storage_type);
-            if (e && !e.descr) e.descr = String(o.storage_descr);
-          }
+          // Descr/type juga ditulis telegraf sebagai TAG pada baris lain.
+          entryFor(o);
         },
         error: () => resolve(),
         complete: () => resolve()
       });
     });
 
-    // Memory dari entri hrStorage bertipe RAM (hrStorageRam .1.3.6.1.2.1.25.2.1.2
-    // atau deskripsi umum). Bytes = jumlah unit × alloc_units.
-    const RAM_TYPE = '.1.3.6.1.2.1.25.2.1.2';
-    const ramEntry = result.storage_entries.find(e => {
-      const d = (e.descr || '').trim().toLowerCase();
-      return e.storage_type === RAM_TYPE ||
-        d === 'physical memory' || d === 'main memory' || d === 'ram' ||
-        d === 'real memory' || d === 'system memory';
-    });
-    if (ramEntry && ramEntry.alloc_units > 0) {
-      result.memory_total = (ramEntry.size || 0) * ramEntry.alloc_units;
-      result.memory_used = (ramEntry.used || 0) * ramEntry.alloc_units;
+    // Memory runtime: total = Physical memory, used = total - MemAvailable
+    // (lihat computeHrStorageMemory). `used_percent` dihitung dari dua nilai itu.
+    const memory = computeHrStorageMemory(result.storage_entries);
+    if (memory) {
+      result.memory_total = memory.total_bytes;
+      result.memory_used = memory.used_bytes;
+      result.memory_used_percent = memory.used_percent;
     }
   } catch (err) {
     console.error('[InfluxService] getSystemMetrics error:', err.message);
@@ -757,6 +841,8 @@ module.exports = {
   getPacketLossHistory,
   getInterfaceThroughputRates,
   getSystemMetrics,
+  classifyHrStorageEntry,
+  computeHrStorageMemory,
   getInterfaceErrorCounters,
   getInterfaceThroughputHistory
 };

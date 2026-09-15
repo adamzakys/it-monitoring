@@ -264,6 +264,17 @@ function cliSafeName(name) {
     .replace(/\s+/g, '');    // Hapus spasi jadi tanpa-spasi untuk nama RouterOS
 }
 
+/**
+ * Identifier RouterOS yang ketat — hanya huruf & angka.
+ * Dipakai untuk /system/logging/action name= yang menolak '-', '_', '.' dengan
+ * error "action name can contain only letters and numbers". Berbeda dari
+ * /system identity yang justru menerima '-'.
+ */
+function routerosIdentifier(name) {
+  const cleaned = String(name || '').replace(/[^A-Za-z0-9]/g, '');
+  return cleaned || 'BMSDevice';
+}
+
 function generateCommands(device, gaps) {
   const type = (device.device_type || 'router').toLowerCase();
   const rawName = device.name || 'DEVICE';
@@ -294,36 +305,49 @@ function generateCommands(device, gaps) {
           description: 'Agar BMS dapat membaca metrik CPU, RAM, Interface, Uptime via SNMP.',
           commands: [
             '# 1. Set nama device (tanpa spasi):',
-            `/system identity set name=${safeName}`,
-            '# 2. Aktifkan SNMP:',
-            '/snmp set enabled=yes',
-            '# 3. Tambah alamat akses (allow from all):',
-            `/snmp add address=0.0.0.0/0 contact="BMS-NOC" read-access=yes community=${community}`,
-            '# 4. Set trap destination (opsional):',
-            `/snmp set trap-community=bms-trap`,
-            `/snmp set trap-targets=${APP_IP}`
+            `/system/identity/set name=${safeName}`,
+            '# 2. Aktifkan SNMP & isi contact (contact = properti global /snmp):',
+            '/snmp/set enabled=yes',
+            '/snmp/set contact="BMS-NOC"',
+            '# 3. Tambah community read-only di sub-menu community (allow from all):',
+            `/snmp/community/add name=${community} address=0.0.0.0/0 read-access=yes write-access=no`,
+            '# 4. OPSIONAL — SNMP trap (notifikasi push). Polling tetap jalan tanpa ini.',
+            '#    Hapus 2 baris berikut bila tidak perlu trap / agar config portabel antar jaringan.',
+            '#    trap-community harus menunjuk community yang sudah ada:',
+            `/snmp/set trap-community=${community}`,
+            `/snmp/set trap-target=${APP_IP}`
           ]
         });
       }
       if (gap === 'syslog') {
+        const actionName = routerosIdentifier(rawName);
         results.push({
           id: 'enable_syslog',
           label: 'Enable Remote Syslog',
           urgency: 'high',
           description: 'Agar log device masuk real-time ke BMS via UDP/TCP port 5514. PENTING: rule RouterOS cocok berdasarkan TOPIC pesan — rule dengan topics=info TIDAK akan mengirim pesan bertopik script,warning/error.',
           commands: [
-            '# 1. Buat logging action remote ke server BMS:',
-            `/system/logging/action/add name=${safeName} target=remote remote=${APP_IP} remote-port=${SYSLOG_PORT}`,
-            '# 2. Bersihkan rule lama untuk action ini (opsional, hindari kirim ganda):',
-            `/system/logging/remove [find action=${safeName}]`,
-            '# 3. Tambahkan rule — topics HARUS mencakup topik pesan yang diinginkan:',
-            `/system/logging/add topics=info,error,warning,critical,script,account,system action=${safeName}`,
-            '# 4. Verifikasi action:',
-            `/system/logging/action/print detail where name=${safeName}`,
-            '# 5. Verifikasi rule:',
+            '# 1. Hapus action lama bila ada (aman diulang / menimpa setelan lama):',
+            `/system/logging/action/remove [find name=${actionName}]`,
+            '# 2. Buat logging action remote ke server BMS (name hanya boleh huruf & angka):',
+            `/system/logging/action/add name=${actionName} target=remote remote=${APP_IP} remote-port=${SYSLOG_PORT}`,
+            '# 3. Bersihkan rule lama untuk action ini (hindari kirim ganda):',
+            `/system/logging/remove [find action=${actionName}]`,
+            '# 4. Tambah SATU RULE PER TOPIC — RouterOS mencocokkan SEMUA topic di dalam satu rule',
+            '#    (AND), jadi topics=info,error,warning,... dalam satu baris TIDAK akan pernah match:',
+            `/system/logging/add topics=info action=${actionName}`,
+            `/system/logging/add topics=error action=${actionName}`,
+            `/system/logging/add topics=warning action=${actionName}`,
+            `/system/logging/add topics=critical action=${actionName}`,
+            `/system/logging/add topics=script action=${actionName}`,
+            `/system/logging/add topics=account action=${actionName}`,
+            `/system/logging/add topics=system action=${actionName}`,
+            '# 5. Verifikasi action:',
+            `/system/logging/action/print detail where name=${actionName}`,
+            '# 6. Verifikasi rule (harus ada 7 rule menunjuk action ini):',
             '/system/logging/print',
-            '# 6. Kirim log uji (harus muncul di BMS dalam ±2 detik):',
-            '/log warning "BMS-TEST"'
+            '# 7. Kirim log uji (harus muncul di BMS dalam ±2 detik):',
+            '/log/warning "BMS-TEST"'
           ]
         });
       }

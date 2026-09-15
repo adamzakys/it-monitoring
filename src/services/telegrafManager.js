@@ -265,13 +265,17 @@ function buildTelegrafConfig(device) {
       oid = ".1.3.6.1.2.1.25.2.3.1.4"
       name = "storage_alloc_units"
 
+    # hrStorageSize (.5) = kapasitas total, hrStorageUsed (.6) = terpakai.
+    # Sebelumnya .5 dinamai "storage_used" dan .6 "storage_size" sehingga kedua
+    # label tertukar dan backend harus mengompensasi. Nama kini mengikuti
+    # semantik OID-nya.
     [[inputs.snmp.table.field]]
       oid = ".1.3.6.1.2.1.25.2.3.1.5"
-      name = "storage_used"
+      name = "storage_size"
 
     [[inputs.snmp.table.field]]
       oid = ".1.3.6.1.2.1.25.2.3.1.6"
-      name = "storage_size"
+      name = "storage_used"
 `;
 }
 

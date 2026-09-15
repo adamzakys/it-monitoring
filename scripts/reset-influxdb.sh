@@ -115,9 +115,11 @@ else
 
   # 1. Sign in untuk dapat session
   echo "[INFO] Signing in as $ADMIN_USER..."
-  SIGNIN_RESPONSE=$(curl -s -i -X POST "$INFLUX_URL/api/v2/auth/signin" \
-    -H "Content-Type: application/json" \
-    -d "{\"username\": \"$ADMIN_USER\", \"password\": \"$ADMIN_PASS\"")
+  # InfluxDB 2.9 menolak POST /api/v2/signin dengan JSON body (selalu 401,
+  # walau user/password benar). Autentikasi harus lewat HTTP Basic.
+  # Endpoint lama /api/v2/auth/signin sudah tidak ada di v2.9.
+  SIGNIN_RESPONSE=$(curl -s -i -X POST "$INFLUX_URL/api/v2/signin" \
+    -u "$ADMIN_USER:$ADMIN_PASS")
 
   # Extract Set-Cookie header
   SESSION_COOKIE=$(echo "$SIGNIN_RESPONSE" | grep -i "^Set-Cookie:" | head -1 | sed 's/^[Ss]et-[Cc]ookie: //' | cut -d';' -f1)

@@ -10,6 +10,7 @@ const telegrafManager = require('./services/telegrafManager');
 const topologyDiscovery = require('./services/topologyDiscovery');
 const { initStreamService, broadcastToDevice } = require('./services/streamService');
 const logCollectorModule = require('./services/logCollector');
+const threatTimeline = require('./services/threatTimeline');
 
 const app = express();
 const server = http.createServer(app);
@@ -81,6 +82,17 @@ async function bootstrap() {
     console.log(`[LogCollector] ${sysStatus} | SNMP Trap: ${trap ? (trap.started ? `AKTIF (${trap.status})` : `${trap.status} — ${trap.reason || ''}`) : 'nonaktif'} | Retensi ${collector.retentionDays} hari`);
   } catch (e) {
     console.warn('[LogCollector] init error (lanjut tanpa log collector):', e.message);
+  }
+
+  // 2a2. Threat Timeline — korelasi log menjadi sesi incident.
+  // Backfill (kategorisasi baris lama + pengelompokan) berjalan di latar
+  // belakang setelah 5 detik; idempoten karena hanya memproses baris yang
+  // kolom `category`-nya masih NULL.
+  try {
+    threatTimeline.initThreatTimeline();
+    console.log('[Bootstrap] Threat Timeline engine active');
+  } catch (e) {
+    console.warn('[Bootstrap] threatTimeline init error:', e.message);
   }
 
   // 2b. Initialize Topology Discovery (LLDP/CDP periodic)

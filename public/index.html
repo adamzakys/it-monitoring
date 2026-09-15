@@ -657,46 +657,83 @@
             <div class="dic-log-footer" id="detail-log-hint"></div>
           </div>
 
-          <!-- ROW 6b: INCIDENTS & ACTIVITY (satu kartu, peran jelas) -->
+          <!-- ROW 6: INCIDENTS & ACTIVITY — satu kartu, dua kolom semantik.
+               Kolom kiri: insiden kesehatan device (health engine).
+               Kolom kanan: Threat Timeline (korelasi log → sesi incident). -->
           <div class="dic-card dic-incidents">
             <div class="dic-card-header">
               <div class="dic-card-title">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
                 <h3>Incidents &amp; Activity</h3>
               </div>
-              <span class="dic-freshness-inline">Incident aktif (timeline) vs riwayat vs event state-change</span>
+              <span class="dic-freshness-inline">Kiri: kesehatan device (root cause &amp; riwayat) · Kanan: Threat Timeline dari korelasi log</span>
             </div>
             <div class="dic-incident-grid">
-              <!-- Kiri: incident AKTIF — root cause + timeline -->
-              <div class="dic-incident-panel" id="detail-rootcause-card">
-                <div class="dic-panel-title">Active Incident — Root Cause
-                  <span class="alert-severity-badge" id="detail-rootcause-severity" style="display:none;">--</span>
+
+              <!-- KOLOM KIRI: insiden kesehatan device -->
+              <div class="dic-incident-col">
+                <div class="dic-incident-panel" id="detail-rootcause-card">
+                  <div class="dic-panel-title">Active Incident — Root Cause
+                    <span class="alert-severity-badge" id="detail-rootcause-severity" style="display:none;">--</span>
+                  </div>
+                  <div class="dic-rootcause-content" id="detail-rootcause-content">
+                    <div class="dic-empty-state">No active incident</div>
+                  </div>
+                  <div class="dic-panel-title" style="margin-top:16px;">Incident Timeline
+                    <span id="detail-timeline-count" class="dic-count-badge">--</span>
+                  </div>
+                  <div class="dic-timeline-list" id="detail-timeline-list">
+                    <div class="dic-empty-state">No active incident timeline</div>
+                  </div>
                 </div>
-                <div class="dic-rootcause-content" id="detail-rootcause-content">
-                  <div class="dic-empty-state">No active incident</div>
-                </div>
-                <div class="dic-panel-title" style="margin-top:16px;">Incident Timeline
-                  <span id="detail-timeline-count" class="dic-count-badge">--</span>
-                </div>
-                <div class="dic-timeline-list" id="detail-timeline-list">
-                  <div class="dic-empty-state">No active incident timeline</div>
+
+                <div class="dic-incident-panel" id="detail-timeline-card">
+                  <div class="dic-panel-title">Incident History
+                    <span id="detail-history-count" class="dic-count-badge">--</span>
+                  </div>
+                  <div class="dic-history-list" id="detail-history-list">
+                    <div class="dic-empty-state">No incident history</div>
+                  </div>
+                  <div class="dic-panel-title" style="margin-top:16px;">Recent Events
+                    <span id="detail-events-count" class="dic-count-badge">--</span>
+                  </div>
+                  <div class="dic-events-list" id="detail-events-list">
+                    <div class="dic-empty-state">Loading events...</div>
+                  </div>
                 </div>
               </div>
-              <!-- Kanan: riwayat incident + event state-change hasil polling -->
-              <div class="dic-incident-panel" id="detail-timeline-card">
-                <div class="dic-panel-title">Incident History
-                  <span id="detail-history-count" class="dic-count-badge">--</span>
-                </div>
-                <div class="dic-history-list" id="detail-history-list">
-                  <div class="dic-empty-state">No incident history</div>
-                </div>
-                <div class="dic-panel-title" style="margin-top:16px;">Recent Events
-                  <span id="detail-events-count" class="dic-count-badge">--</span>
-                </div>
-                <div class="dic-events-list" id="detail-events-list">
-                  <div class="dic-empty-state">Loading events...</div>
+
+              <!-- KOLOM KANAN: Threat Timeline (sesi korelasi log + event tanpa rule) -->
+              <div class="dic-incident-col" id="detail-threat-card">
+                <div class="dic-incident-panel">
+                  <div class="dic-panel-title">Threat Timeline
+                    <span class="dic-threat-controls">
+                      <select id="threat-filter" class="select-interface" style="width:auto;" aria-label="Filter status threat incident">
+                        <option value="all">Semua (Open / Ack / Resolved)</option>
+                        <option value="open">Hanya Open &amp; Acknowledged</option>
+                      </select>
+                      <select id="threat-sev" class="select-interface" style="width:auto;" aria-label="Filter severity threat incident">
+                        <option value="all">All severity</option>
+                        <option value="critical">critical</option>
+                        <option value="warning">warning</option>
+                      </select>
+                      <span class="dic-count-badge" id="threat-count">0</span>
+                      <span class="dic-live-dot" id="threat-live" title="Realtime stream"></span>
+                    </span>
+                  </div>
+                  <div class="dic-threat-list" id="threat-list">
+                    <div class="dic-empty-state">Loading threat timeline…</div>
+                  </div>
+                  <div class="dic-panel-title" style="margin-top:16px;">Event individual (tanpa rule)
+                    <span class="dic-count-badge" id="threat-loose-count">0</span>
+                  </div>
+                  <div class="dic-threat-loose" id="threat-loose-list">
+                    <div class="dic-empty-state">—</div>
+                  </div>
+                  <div class="dic-log-footer" id="threat-hint"></div>
                 </div>
               </div>
+
             </div>
           </div>
 

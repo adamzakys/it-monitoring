@@ -4,6 +4,7 @@
 - Backend running: `npm run dev` or `./start.sh`
 - WebSocket connected (green pulse dot in header)
 - At least 1 device showing in the device matrix
+- 
 
 ---
 
