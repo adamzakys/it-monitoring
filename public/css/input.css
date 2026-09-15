@@ -13,38 +13,38 @@
     ========================================================================== */
 
 @theme {
-  /* Brand — muted, authoritative */
-  --color-brand: #1E6E8E;
-  --color-brand-strong: #15506A;
-  --color-brand-soft: rgba(30, 110, 142, 0.12);
-  --color-accent: #C48A00;
-  --color-accent-soft: rgba(196, 138, 0, 0.1);
+  /* Brand — BMS corporate colors */
+  --color-brand: #2596be;
+  --color-brand-strong: #1d7a9c;
+  --color-brand-soft: rgba(37, 150, 190, 0.12);
+  --color-accent: #2596be;
+  --color-accent-soft: rgba(37, 150, 190, 0.1);
 
-  /* Surfaces — cool slate dark */
-  --color-bg-base: #0B0F17;
-  --color-surface: #111724;
-  --color-elevated: #182033;
-  --color-card: #111724;
-  --color-card-hover: #151D2E;
+  /* Surfaces — solid, high-contrast dark panels */
+  --color-bg-base: #0a0e17;
+  --color-surface: #121a2a;
+  --color-elevated: #1b2436;
+  --color-card: #161f30;
+  --color-card-hover: #1d2739;
 
-  /* Borders — thin, subtle, opacity-driven */
-  --color-border-subtle: rgba(255, 255, 255, 0.06);
-  --color-border-default: rgba(255, 255, 255, 0.09);
-  --color-border-highlight: rgba(255, 255, 255, 0.14);
+  /* Borders */
+  --color-border-subtle: rgba(255, 255, 255, 0.10);
+  --color-border-default: rgba(255, 255, 255, 0.14);
+  --color-border-highlight: rgba(255, 255, 255, 0.18);
 
-  /* Functional / operational — precise & recognizable */
-  --color-online: #0FA068;
-  --color-warning: #D4A017;
-  --color-offline: #D63031;
+  /* Functional / operational */
+  --color-online: #34d399;
+  --color-warning: #fbbf24;
+  --color-offline: #fb7185;
 
   /* Throughput chart */
-  --color-inbound: #00A3B0;
-  --color-outbound: #CC7A00;
+  --color-inbound: #2596be;
+  --color-outbound: #1d7a9c;
 
-  /* Text */
-  --color-text-primary: #E8ECF2;
-  --color-text-secondary: #8B95A5;
-  --color-text-muted: #5A6577;
+  /* Text — brighter secondary/muted for readability */
+  --color-text-primary: #f0f3f7;
+  --color-text-secondary: rgba(255, 255, 255, 0.72);
+  --color-text-muted: rgba(255, 255, 255, 0.50);
 
   /* Typography */
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;

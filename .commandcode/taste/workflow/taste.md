@@ -1,15 +1,9 @@
-# Taste
+# Workflow & Communication Preferences
 
-## Tooling & codebase navigation
-- Expects a repository to be indexed into the codebase-memory knowledge graph (MCP tool) before/for code work — a bare "Index this repository using codebase-memory." should result in locating and invoking that MCP tool. Confidence: 0.5
-
-## Approach to fixes
-- Audit before patching: when fixing a bug in redesigned code, find the previously-working implementation and restore the broken binding rather than rebuilding or redesigning the UI. Confidence: 0.7
-- When the user asks "is this a protocol/tooling limitation or a bug in our code?" (e.g. why can't LLDP give neighbor IPs), investigate first — read the code path and probe the live device/protocol — and explicitly answer the limitation-vs-code question before proposing a fix. A placeholder like "unknown" should be treated as an app gap until the protocol is proven unable to supply the data. Confidence: 0.6
-- Prefer not to change the backend unless a needed endpoint genuinely does not exist; reuse existing endpoints and data sources (no new endpoints "if not needed", no backend change "bila frontend saja cukup"). Confidence: 0.8
-- Requires runtime evidence before claiming success — "Jangan tulis PASS tanpa bukti" — verify against the running system (live API/browser probes), not just static reasoning. Confidence: 0.9
-- When a panel shows no data, audit whether the data actually exists upstream (old dashboard, API, DB) before concluding the data is genuinely empty — treat it as a broken frontend binding first. Confidence: 0.7
-- When a panel shows no data, first determine whether the data source itself is dead (e.g. Telegraf stopped writing) vs. when the UI was wrong. Confidence: 0.8
-- Fix generated artifacts at the source that creates them (config template/generator), not just the currently-broken files: the user expects newly added resources (e.g. a device added via UI later) to also come out valid, so regenerate existing files from the corrected generator and confirm the real binary/command parses them. Confidence: 0.7
-- When a feature is dropped from scope, purge it everywhere end-to-end — probe/check functions, command generation, module exports, related env constants, and frontend layer counts/labels/placeholder text — not just the primary code path; leftover references ("checks.trap", "Checks: … · Trap · Telegraf") are treated as the removal not being done. Confidence: 0.7
-- For large multi-part tasks expects a written plan first ("pahami dan buatkan plan dulu agar kamu paham") and iterates on it: plan revisions/approval questions until agreed, then implements phase-by-phase with per-phase verification and a final regression check. Confidence: 0.7
+- Expects project responses in Bahasa Indonesia. Confidence: 0.9
+- When a new design system or style guide is requested, install external specs by saving `SKILL.md` and `DESIGN.md` to `.agents/skills/<name>/` for tool re-indexing. Confidence: 0.8
+- Prefers batch-processing UI changes: read all relevant selectors in parallel, then apply glassmorphism/cascading updates in a single pass rather than fixing one component at a time. Confidence: 0.85
+- Expects compiled/generated assets to be rebuilt and the actually-served output verified after source edits (e.g. `npm run css:build`, `node --check`, then curl the served stylesheet and grep for the new tokens) — editing source files alone is not proof of a done change. Confidence: 0.7
+- Wants immediate bug fixes without fluff; prioritizes getting broken interactive states (like panel toggles) working correctly over theoretical explanations. Confidence: 0.85
+- When asking how a feature or data transform actually works (what a displayed metric means, how logs are normalized/converted, where a conversion happens), wants the answer traced down to the real mechanism in the codebase — the actual config/code path with file and line references — plus the equivalent raw execution (e.g. the literal `ping -c 3 -i 0.25 -W 2 <ip>`) and concrete step-by-step timelines — rather than an abstract restatement of the definition. Pushes back on assumptions ("gamungkin dong") and keeps drilling (e.g. whether the UI waits for all samples before rendering) until the concrete sampling/conversion and display behavior is spelled out. Confidence: 0.7
+- Prefers to apply production-affecting service changes (e.g. the `sudo kill -HUP` Telegraf reload) himself: the agent should prepare the config and hand over the exact commands rather than restarting/mutating running production services; when verification is needed, spin up an isolated second instance/port and clean it up rather than touching the live one. Confidence: 0.7

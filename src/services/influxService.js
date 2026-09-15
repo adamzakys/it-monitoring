@@ -54,6 +54,8 @@ async function getLiveTelemetry(deviceId, interfaceName) {
     in_mbps: 0.0,
     out_mbps: 0.0,
     latency_ms: 0.0,
+    latency_min: 0.0,
+    latency_max: 0.0,
     packet_loss: 0.0,
     has_data: false
   };
@@ -63,7 +65,8 @@ async function getLiveTelemetry(deviceId, interfaceName) {
     from(bucket: "${bucket}")
       |> range(start: -15s)
       |> filter(fn: (r) => r["_measurement"] == "ping" and r["device_id"] == "${devIdStr}")
-      |> filter(fn: (r) => r["_field"] == "average_response_ms" or r["_field"] == "percent_packet_loss")
+      |> filter(fn: (r) => r["_field"] == "average_response_ms" or r["_field"] == "minimum_response_ms"
+                       or r["_field"] == "maximum_response_ms" or r["_field"] == "percent_packet_loss")
       |> last()
   `;
 
@@ -93,6 +96,12 @@ async function getLiveTelemetry(deviceId, interfaceName) {
           results.has_data = true;
           if (o._field === 'average_response_ms') {
             results.latency_ms = parseFloat(parseFloat(o._value).toFixed(2));
+          }
+          if (o._field === 'minimum_response_ms') {
+            results.latency_min = parseFloat(parseFloat(o._value).toFixed(2));
+          }
+          if (o._field === 'maximum_response_ms') {
+            results.latency_max = parseFloat(parseFloat(o._value).toFixed(2));
           }
           if (o._field === 'percent_packet_loss') {
             results.packet_loss = parseFloat(parseFloat(o._value).toFixed(1));
@@ -291,6 +300,12 @@ function mapOperStatus(code) {
 /**
  * Fetches RTT history: min/avg/max/std-dev over the last N minutes (default 5)
  * Returns array of { time, min, avg, max, jitter } sorted ascending
+ *
+ * Sengaja TIDAK memakai aggregateWindow(every: 5s, fn: mean): periode window
+ * 5s sama dengan periode spike sehingga hasilnya aliasing (setiap window berisi
+ * tepat satu spike + empat baseline → selalu ~1.0ms), dan `mean` pada field
+ * minimum/maximum menghapus nilai ekstrem yang justru ingin dilihat.
+ * Titik mentah 1s dari collector dikembalikan apa adanya agar API == collector.
  */
 async function getLatencyHistory(deviceId, minutes = 5) {
   const { queryApi, bucket } = getClient();
@@ -301,7 +316,6 @@ async function getLatencyHistory(deviceId, minutes = 5) {
       |> filter(fn: (r) => r["_measurement"] == "ping" and r["device_id"] == "${devIdStr}")
       |> filter(fn: (r) => r["_field"] == "average_response_ms" or r["_field"] == "minimum_response_ms"
                        or r["_field"] == "maximum_response_ms" or r["_field"] == "standard_deviation_ms")
-      |> aggregateWindow(every: 5s, fn: mean, createEmpty: false)
       |> group(columns: ["_field"])
   `;
 
@@ -312,11 +326,11 @@ async function getLatencyHistory(deviceId, minutes = 5) {
         next: (row, tableMeta) => {
           const o = tableMeta.toObject(row);
           const f = o._field;
-          if (byField[f]) {
-            byField[f].push({
-              time: o._time,
-              value: parseFloat(o._value) || 0
-            });
+          const v = parseFloat(o._value);
+          // Jangan pernah mengubah nilai non-finite menjadi 0 — itu menciptakan
+          // titik RTT palsu. Titik yang tidak valid dibuang saja.
+          if (byField[f] && Number.isFinite(v)) {
+            byField[f].push({ time: o._time, value: v });
           }
         },
         error: () => resolve(),

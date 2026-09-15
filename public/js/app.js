@@ -53,7 +53,114 @@ const state = {
   activePanelTab: 'incidents',
   incidentSearch: '',
   incidentSevFilter: 'all',
+  _overlayCount: 0, // Body overflow reference counter
 };
+
+// ---------------------------------------------------------------------------
+// Device Category Taxonomy — single source of truth for device_type keys,
+// display labels, and Lucide icons. Consumed by the device cards, the add/edit
+// device form, and the network topology map.
+// ---------------------------------------------------------------------------
+const DEVICE_ICONS = {
+  router: '<rect width="20" height="8" x="2" y="14" rx="2" /> <path d="M6.01 18H6" /> <path d="M10.01 18H10" /> <path d="M15 10v4" /> <path d="M17.84 7.17a4 4 0 0 0-5.66 0" /> <path d="M20.66 4.34a8 8 0 0 0-11.31 0" />',
+  switch: '<rect x="16" y="16" width="6" height="6" rx="1" /> <rect x="2" y="16" width="6" height="6" rx="1" /> <rect x="9" y="2" width="6" height="6" rx="1" /> <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" /> <path d="M12 12V8" />',
+  access_point: '<path d="M12 20h.01" /> <path d="M2 8.82a15 15 0 0 1 20 0" /> <path d="M5 12.859a10 10 0 0 1 14 0" /> <path d="M8.5 16.429a5 5 0 0 1 7 0" />',
+  bridge: '<circle cx="18" cy="18" r="3" /> <circle cx="6" cy="6" r="3" /> <path d="M6 21V9a9 9 0 0 0 9 9" />',
+  firewall: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />',
+  gateway: '<path d="M10 21H2" /> <path d="M10 3H7a2 2 0 00-2 2v16" /> <path d="M14 12h.01" /> <path d="M19 21V5a2 2 0 00-1.675-1.974l-6.163-1.013A1 1 0 0010 3v18a1 1 0 001.124.992z" /> <path d="M22 21h-3" />',
+  server: '<rect width="20" height="8" x="2" y="2" rx="2" ry="2" /> <rect width="20" height="8" x="2" y="14" rx="2" ry="2" /> <line x1="6" x2="6.01" y1="6" y2="6" /> <line x1="6" x2="6.01" y1="18" y2="18" />',
+  vm: '<rect width="20" height="14" x="2" y="3" rx="2" /> <line x1="8" x2="16" y1="21" y2="21" /> <line x1="12" x2="12" y1="17" y2="21" />',
+  hypervisor: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z" /> <path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12" /> <path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17" />',
+  container_host: '<path d="M22 7.7c0-.6-.4-1.2-.8-1.5l-6.3-3.9a1.72 1.72 0 0 0-1.7 0l-10.3 6c-.5.2-.9.8-.9 1.4v6.6c0 .5.4 1.2.8 1.5l6.3 3.9a1.72 1.72 0 0 0 1.7 0l10.3-6c.5-.3.9-1 .9-1.5Z" /> <path d="M10 21.9V14L2.1 9.1" /> <path d="m10 14 11.9-6.9" /> <path d="M14 19.8v-8.1" /> <path d="M18 17.5V9.4" />',
+  nas: '<path d="M10 16h.01" /> <path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /> <path d="M21.946 12.013H2.054" /> <path d="M6 16h.01" />',
+  san: '<ellipse cx="12" cy="5" rx="9" ry="3" /> <path d="M3 5V19A9 3 0 0 0 21 19V5" /> <path d="M3 12A9 3 0 0 0 21 12" />',
+  backup: '<rect width="20" height="5" x="2" y="3" rx="1" /> <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" /> <path d="M10 12h4" />',
+  cctv: '<path d="M16.75 12h3.632a1 1 0 0 1 .894 1.447l-2.034 4.069a1 1 0 0 1-1.708.134l-2.124-2.97" /> <path d="M17.106 9.053a1 1 0 0 1 .447 1.341l-3.106 6.211a1 1 0 0 1-1.342.447L3.61 12.3a2.92 2.92 0 0 1-1.3-3.91L3.69 5.6a2.92 2.92 0 0 1 3.92-1.3z" /> <path d="M2 19h3.76a2 2 0 0 0 1.8-1.1L9 15" /> <path d="M2 21v-4" /> <path d="M7 9h.01" />',
+  nvr: '<path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5" /> <rect x="2" y="6" width="14" height="12" rx="2" />',
+  ups: '<path d="m11 7-3 5h4l-3 5" /> <path d="M14.856 6H16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.935" /> <path d="M22 14v-4" /> <path d="M5.14 18H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2.936" />',
+  pdu: '<path d="M12 22v-5" /> <path d="M15 8V2" /> <path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z" /> <path d="M9 8V2" />',
+  cooling: '<path d="M10.827 16.379a6.082 6.082 0 0 1-8.618-7.002l5.412 1.45a6.082 6.082 0 0 1 7.002-8.618l-1.45 5.412a6.082 6.082 0 0 1 8.618 7.002l-5.412-1.45a6.082 6.082 0 0 1-7.002 8.618l1.45-5.412Z" /> <path d="M12 12v.01" />',
+  iot_gateway: '<path d="M4.9 16.1C1 12.2 1 5.8 4.9 1.9" /> <path d="M7.8 4.7a6.14 6.14 0 0 0-.8 7.5" /> <circle cx="12" cy="9" r="2" /> <path d="M16.2 4.8c2 2 2.26 5.11.8 7.47" /> <path d="M19.1 1.9a9.96 9.96 0 0 1 0 14.1" /> <path d="M9.5 18h5" /> <path d="m8 22 4-11 4 11" />',
+  wireless_bridge: '<path d="M16.247 7.761a6 6 0 0 1 0 8.478" /> <path d="M19.075 4.933a10 10 0 0 1 0 14.134" /> <path d="M4.925 19.067a10 10 0 0 1 0-14.134" /> <path d="M7.753 16.239a6 6 0 0 1 0-8.478" /> <circle cx="12" cy="12" r="2" />',
+  cellular_router: '<path d="M2 20h.01" /> <path d="M7 20v-4" /> <path d="M12 20v-8" /> <path d="M17 20V8" /> <path d="M22 4v16" />',
+  satellite: '<path d="m13.5 6.5-3.148-3.148a1.205 1.205 0 0 0-1.704 0L6.352 5.648a1.205 1.205 0 0 0 0 1.704L9.5 10.5" /> <path d="M16.5 7.5 19 5" /> <path d="m17.5 10.5 3.148 3.148a1.205 1.205 0 0 1 0 1.704l-2.296 2.296a1.205 1.205 0 0 1-1.704 0L13.5 14.5" /> <path d="M9 21a6 6 0 0 0-6-6" /> <path d="M9.352 10.648a1.205 1.205 0 0 0 0 1.704l2.296 2.296a1.205 1.205 0 0 0 1.704 0l4.296-4.296a1.205 1.205 0 0 0 0-1.704l-2.296-2.296a1.205 1.205 0 0 0-1.704 0z" />',
+  laptop: '<path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z" /> <path d="M20.054 15.987H3.946" />',
+  desktop: '<rect width="14" height="20" x="5" y="2" rx="2" /> <path d="M15 14h.01" /> <path d="M9 6h6" /> <path d="M9 10h6" />',
+  printer: '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" /> <path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6" /> <rect x="6" y="14" width="12" height="8" rx="1" />',
+  ip_phone: '<path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384" />',
+  unknown: '<circle cx="12" cy="12" r="10" /> <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /> <path d="M12 17h.01" />',
+  unmanaged: '<path d="M10.1 2.182a10 10 0 0 1 3.8 0" /> <path d="M13.9 21.818a10 10 0 0 1-3.8 0" /> <path d="M17.609 3.721a10 10 0 0 1 2.69 2.7" /> <path d="M2.182 13.9a10 10 0 0 1 0-3.8" /> <path d="M20.279 17.609a10 10 0 0 1-2.7 2.69" /> <path d="M21.818 10.1a10 10 0 0 1 0 3.8" /> <path d="M3.721 6.391a10 10 0 0 1 2.7-2.69" /> <path d="M6.391 20.279a10 10 0 0 1-2.69-2.7" />'
+};
+
+const DEVICE_TYPE_LABELS = {
+  router: 'Router',
+  switch: 'Switch',
+  access_point: 'Access Point',
+  bridge: 'Bridge',
+  firewall: 'Firewall',
+  gateway: 'Gateway',
+  server: 'Server',
+  vm: 'Virtual Machine',
+  hypervisor: 'Hypervisor',
+  container_host: 'Container Host',
+  nas: 'NAS',
+  san: 'SAN',
+  backup: 'Backup Appliance',
+  cctv: 'CCTV Camera',
+  nvr: 'NVR',
+  ups: 'UPS',
+  pdu: 'PDU',
+  cooling: 'Cooling Unit',
+  iot_gateway: 'IoT Gateway',
+  wireless_bridge: 'Wireless Bridge',
+  cellular_router: 'Cellular Router',
+  satellite: 'Satellite Terminal',
+  laptop: 'Laptop',
+  desktop: 'Desktop',
+  printer: 'Printer',
+  ip_phone: 'IP Phone',
+  unknown: 'Unknown',
+  unmanaged: 'Unmanaged'
+};
+
+const DEVICE_TYPE_ORDER = ['router', 'switch', 'access_point', 'bridge', 'firewall', 'gateway', 'server', 'vm', 'hypervisor', 'container_host', 'nas', 'san', 'backup', 'cctv', 'nvr', 'ups', 'pdu', 'cooling', 'iot_gateway', 'wireless_bridge', 'cellular_router', 'satellite', 'laptop', 'desktop', 'printer', 'ip_phone', 'unknown', 'unmanaged'];
+
+// Normalizes an arbitrary device_type into a known taxonomy key.
+function deviceTypeKey(type) {
+  const k = String(type || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return DEVICE_ICONS[k] ? k : 'unknown';
+}
+
+function deviceTypeLabel(type) {
+  return DEVICE_TYPE_LABELS[deviceTypeKey(type)] || 'Unknown';
+}
+
+// Inline SVG icon that inherits the surrounding text color.
+function deviceIconSvg(type, size) {
+  const dim = size || 16;
+  return '<svg class="dev-icon" width="' + dim + '" height="' + dim + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + DEVICE_ICONS[deviceTypeKey(type)] + '</svg>';
+}
+
+// Standalone SVG as a data URI. vis.js image nodes cannot inherit CSS color,
+// so the status color is baked into the markup.
+function deviceIconDataUri(type, color, size) {
+  const dim = size || 28;
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + dim + '" height="' + dim + '" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + DEVICE_ICONS[deviceTypeKey(type)] + '</svg>';
+  return 'data:image/svg+xml,' + encodeURIComponent(svg);
+}
+
+// Body scroll lock/unlock — prevents race condition when multiple overlays open/close
+function lockBodyScroll() {
+  state._overlayCount++;
+  if (state._overlayCount >= 1) document.body.style.overflow = 'hidden';
+}
+function unlockBodyScroll() {
+  state._overlayCount--;
+  if (state._overlayCount <= 0) {
+    document.body.style.overflow = '';
+    state._overlayCount = 0;
+  }
+}
 
 document.addEventListener('DOMContentLoaded', () => {
   initApp();
@@ -63,6 +170,9 @@ async function initApp() {
   initCharts();
   setupEventListeners();
   await loadInitialData();
+  // Kembalikan menu terakhir (mis. Readiness) setelah data siap, supaya reload
+  // tidak selalu jatuh ke Dashboard.
+  restoreLastView();
   connectWebSocket();
   // Single traffic scheduler (5s). Guarantees the Real-Time Throughput and
   // Live Traffic windows keep moving even when the WS stream stalls/drops.
@@ -238,9 +348,9 @@ function initCharts() {
       scales: {
         x: {
           display: true,
-          grid: { color: 'rgba(255,255,255,0.04)' },
+          grid: { color: 'rgba(255,255,255,0.10)' },
           ticks: {
-            color: '#64748b',
+            color: '#a8b6c8',
             font: { size: 10 },
             maxTicksLimit: 8
           }
@@ -248,9 +358,9 @@ function initCharts() {
         y: {
           display: true,
           beginAtZero: true,
-          grid: { color: 'rgba(255,255,255,0.06)' },
+          grid: { color: 'rgba(255,255,255,0.14)' },
           ticks: {
-            color: '#64748b',
+            color: '#a8b6c8',
             font: { size: 10 },
             callback: (v) => `${v} Mbps`
           }
@@ -598,7 +708,9 @@ function renderDeviceGrid() {
   filtered.forEach(function (dev) {
     const card = document.createElement('div');
     const isSelected = dev.id === state.selectedDeviceId;
-    const faultClass = dev.status === 'offline' ? 'fault-offline' : (dev.status === 'warning' ? 'fault-warning' : '');
+    const faultClass = dev.status === 'offline' ? 'fault-offline'
+                     : dev.status === 'warning' ? 'fault-warning'
+                     : dev.status === 'online' ? 'fault-online' : '';
 
     card.className = 'device-card ' + (isSelected ? 'selected ' : '') + faultClass;
     card.id = 'dev-card-' + dev.id;
@@ -616,7 +728,7 @@ function renderDeviceGrid() {
     const ifaceText = ifaceCount === 0 ? '--' : (ifaceCount === 1 ? '1 port' : ifaceCount + ' ports');
     const dotClass = 'status-dot ' + (dev.status || 'unknown');
     const statusText = (dev.status || 'unknown');
-    const typeLabel = (dev.device_type || 'device');
+    const typeLabel = deviceTypeLabel(dev.device_type);
 
     card.innerHTML =
       '<div class="card-top">' +
@@ -625,7 +737,7 @@ function renderDeviceGrid() {
       '</div>' +
       '<div class="card-title">' + escapeHtml(dev.name) + '</div>' +
       '<div class="card-ip">' + escapeHtml(dev.ip_address) + '</div>' +
-      '<div class="card-type">' + escapeHtml(typeLabel) + '</div>' +
+      '<div class="card-type">' + deviceIconSvg(dev.device_type, 13) + '<span class="card-type-label">' + escapeHtml(typeLabel) + '</span></div>' +
       '<div class="card-stats-row">' +
         '<div class="stat-item"><span class="stat-label">Response Time</span><span class="stat-val" id="card-lat-' + dev.id + '">' + latText + '</span></div>' +
         '<div class="stat-item"><span class="stat-label">Packet Loss</span><span class="stat-val" id="card-loss-' + dev.id + '" style="color:' + lossColor + '">' + lossText + '</span></div>' +
@@ -685,9 +797,10 @@ function updateCardTelemetry(deviceId, latency, loss, status) {
 
   // Update visual card border, background, dot, and status text
   if (card) {
-    card.classList.remove('fault-offline', 'fault-warning');
+    card.classList.remove('fault-offline', 'fault-warning', 'fault-online');
     if (devStatus === 'offline') card.classList.add('fault-offline');
     else if (devStatus === 'warning') card.classList.add('fault-warning');
+    else if (devStatus === 'online') card.classList.add('fault-online');
 
     const dot = card.querySelector('.status-dot');
     if (dot) {
@@ -788,7 +901,7 @@ function openDeviceDetail(deviceId) {
   const mainViewport = document.querySelector('.main-viewport');
   if (mainViewport) mainViewport.classList.add('device-detail-open');
   backdrop.classList.add('active');
-  document.body.style.overflow = 'hidden';
+  lockBodyScroll();
 
   state.detailDeviceId = deviceId;
   // Reset QoS sliding buffers + any leftover chart overlays from a previous
@@ -879,7 +992,7 @@ function closeDeviceDetail() {
   const mainViewport = document.querySelector('.main-viewport');
   if (mainViewport) mainViewport.classList.remove('device-detail-open');
   backdrop.classList.remove('active');
-  document.body.style.overflow = '';
+  unlockBodyScroll();
   if (state.detailPollingTimer) {
     clearInterval(state.detailPollingTimer);
     state.detailPollingTimer = null;
@@ -895,6 +1008,7 @@ function closeDeviceDetail() {
   state.detailRttBuffer = { labels: [], min: [], avg: [], max: [] };
   state.detailLossBuffer = { labels: [], values: [] };
   state.detailLastTickAt = 0;
+  updateRttStats(state.detailRttBuffer); // reset angka ke "--" saat panel ditutup
 
   // Remove escape key handler
   if (state.detailEscapeHandler) {
@@ -1620,8 +1734,8 @@ function initDetailCharts() {
         }
       },
       scales: {
-        x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 6 } },
-        y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#64748b', font: { size: 9 }, callback: (v) => `${v} Mbps` } }
+        x: { grid: { color: 'rgba(255,255,255,0.10)' }, ticks: { color: '#a8b6c8', font: { size: 9 }, maxTicksLimit: 6 } },
+        y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.14)' }, ticks: { color: '#a8b6c8', font: { size: 9 }, callback: (v) => `${v} Mbps` } }
       }
     }
   });
@@ -1633,9 +1747,9 @@ function initDetailCharts() {
     data: {
       labels: [],
       datasets: [
-        { label: 'min', data: [], borderColor: '#10b981', borderWidth: 1.5, pointRadius: 0, tension: 0.3, spanGaps: true },
-        { label: 'avg', data: [], borderColor: '#00f2fe', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: false, spanGaps: true },
-        { label: 'max', data: [], borderColor: '#ef4444', borderWidth: 1.5, pointRadius: 0, tension: 0.3, spanGaps: true }
+        { label: 'min', data: [], borderColor: '#10b981', borderWidth: 1.5, pointRadius: 0, tension: 0, spanGaps: true },
+        { label: 'avg', data: [], borderColor: '#00f2fe', borderWidth: 2, pointRadius: 0, tension: 0, fill: false, spanGaps: true },
+        { label: 'max', data: [], borderColor: '#ef4444', borderWidth: 1.5, pointRadius: 0, tension: 0, spanGaps: true }
       ]
     },
     options: {
@@ -1648,8 +1762,8 @@ function initDetailCharts() {
         tooltip: { mode: 'index', intersect: false, callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} ms` } }
       },
       scales: {
-        x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 6 } },
-        y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#64748b', font: { size: 9 }, callback: (v) => `${v} ms` } }
+        x: { grid: { color: 'rgba(255,255,255,0.10)' }, ticks: { color: '#a8b6c8', font: { size: 9 }, maxTicksLimit: 6 } },
+        y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.14)' }, ticks: { color: '#a8b6c8', font: { size: 9 }, callback: (v) => `${v} ms` } }
       }
     }
   });
@@ -1688,8 +1802,8 @@ function initDetailCharts() {
         tooltip: { mode: 'index', intersect: false, callbacks: { label: (ctx) => `Loss: ${ctx.parsed.y.toFixed(2)}%` } }
       },
       scales: {
-        x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 6 } },
-        y: { beginAtZero: true, suggestedMax: 100, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#64748b', font: { size: 9 }, callback: (v) => `${v}%` } }
+        x: { grid: { color: 'rgba(255,255,255,0.10)' }, ticks: { color: '#a8b6c8', font: { size: 9 }, maxTicksLimit: 6 } },
+        y: { beginAtZero: true, suggestedMax: 100, grid: { color: 'rgba(255,255,255,0.14)' }, ticks: { color: '#a8b6c8', font: { size: 9 }, callback: (v) => `${v}%` } }
       }
     }
   });
@@ -1868,9 +1982,11 @@ async function trafficPollTick() {
 const QOS_WINDOW = 90;
 
 function seedQosBuffers(data) {
+  // Ambil QOS_WINDOW titik TERBARU (bukan yang paling lama) supaya grafik mulai
+  // dari kondisi terkini dan tidak menampilkan riwayat usang, serta resolusinya
+  // konsisten dengan tick live 1s yang menyusul.
   const rtt = { labels: [], min: [], avg: [], max: [] };
-  (data.latency_history || []).forEach(p => {
-    if (rtt.labels.length >= QOS_WINDOW) return;
+  (data.latency_history || []).slice(-QOS_WINDOW).forEach(p => {
     rtt.labels.push(formatChartTime(p.time));
     rtt.min.push(p.min);
     rtt.avg.push(p.avg);
@@ -1879,8 +1995,7 @@ function seedQosBuffers(data) {
   state.detailRttBuffer = rtt;
 
   const loss = { labels: [], values: [] };
-  (data.loss_history || []).forEach(p => {
-    if (loss.labels.length >= QOS_WINDOW) return;
+  (data.loss_history || []).slice(-QOS_WINDOW).forEach(p => {
     loss.labels.push(formatChartTime(p.time));
     loss.values.push(p.value);
   });
@@ -1888,16 +2003,18 @@ function seedQosBuffers(data) {
 }
 
 function renderQosCharts(data) {
+  const rttBuf = state.detailRttBuffer;
   const rttChart = state.charts.detailRtt;
   if (rttChart) {
-    const b = state.detailRttBuffer;
-    rttChart.data.labels = b.labels;
-    rttChart.data.datasets[0].data = b.min;
-    rttChart.data.datasets[1].data = b.avg;
-    rttChart.data.datasets[2].data = b.max;
+    rttChart.data.labels = rttBuf.labels;
+    rttChart.data.datasets[0].data = rttBuf.min;
+    rttChart.data.datasets[1].data = rttBuf.avg;
+    rttChart.data.datasets[2].data = rttBuf.max;
     rttChart.update('none');
-    setDetailChartEmpty('detailRttChart', b.labels.length > 0 ? 'ok' : 'empty');
+    setDetailChartEmpty('detailRttChart', rttBuf.labels.length > 0 ? 'ok' : 'empty');
   }
+  // Angka ikut buffer yang sama, walau instance chart belum/tidak ada.
+  updateRttStats(rttBuf);
 
   const lossChart = state.charts.detailLoss;
   if (lossChart) {
@@ -1919,6 +2036,29 @@ function renderQosCharts(data) {
   syncLossMaxHeader(data);
 }
 
+/**
+ * Tampilkan angka real min/avg/max dari buffer yang SAMA dengan grafik.
+ * Nilai yang tidak ada ditulis "--" (tidak pernah dipalsukan jadi 0).
+ */
+function updateRttStats(b) {
+  const last = (arr) => (arr && arr.length ? arr[arr.length - 1] : null);
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const n = Number(v);
+    if (v == null || !Number.isFinite(n)) {
+      el.textContent = '--';
+      el.classList.add('is-empty');
+    } else {
+      el.textContent = n.toFixed(2);
+      el.classList.remove('is-empty');
+    }
+  };
+  setVal('detail-rtt-min', last(b.min));
+  setVal('detail-rtt-avg', last(b.avg));
+  setVal('detail-rtt-max', last(b.max));
+}
+
 /** Packet Loss number + chart read the same source: the loss buffer max. */
 function syncLossMaxHeader(data) {
   const lossMaxEl = document.getElementById('detail-loss-max');
@@ -1937,11 +2077,15 @@ function syncLossMaxHeader(data) {
 /** Append one 1s tick to the QoS sliding buffers (FIFO, QOS_WINDOW cap). */
 function pushQosTick(msg, tickLabel) {
   if (msg.latency != null && (msg.packetLoss == null || Number(msg.packetLoss) < 100)) {
-    const val = Number(msg.latency);
+    // Pakai min/avg/max NYATA dari collector (count=3). Hanya kalau backend
+    // tidak menyertakannya (fallback ICMP 1 probe) ketiganya memang sama.
+    const avg = Number(msg.latency);
+    const min = msg.latencyMin != null ? Number(msg.latencyMin) : avg;
+    const max = msg.latencyMax != null ? Number(msg.latencyMax) : avg;
     state.detailRttBuffer.labels.push(tickLabel);
-    state.detailRttBuffer.min.push(val);
-    state.detailRttBuffer.avg.push(val);
-    state.detailRttBuffer.max.push(val);
+    state.detailRttBuffer.min.push(min);
+    state.detailRttBuffer.avg.push(avg);
+    state.detailRttBuffer.max.push(max);
     if (state.detailRttBuffer.labels.length > QOS_WINDOW) {
       state.detailRttBuffer.labels.shift();
       state.detailRttBuffer.min.shift();
@@ -2212,7 +2356,7 @@ async function openIncidentDrawerById(incidentId) {
   const backdrop = document.getElementById('incident-drawer-backdrop');
   if (!backdrop) return;
   backdrop.classList.add('active');
-  document.body.style.overflow = 'hidden';
+  lockBodyScroll();
 
   try {
     const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}`).then(r => r.json());
@@ -2230,7 +2374,7 @@ function openIncidentDrawer(alert) {
   const backdrop = document.getElementById('incident-drawer-backdrop');
   if (!backdrop) return;
   backdrop.classList.add('active');
-  document.body.style.overflow = 'hidden';
+  lockBodyScroll();
 
   renderIncidentDrawerContent(alert);
 }
@@ -2239,7 +2383,7 @@ function closeIncidentDrawer() {
   const backdrop = document.getElementById('incident-drawer-backdrop');
   if (!backdrop) return;
   backdrop.classList.remove('active');
-  document.body.style.overflow = '';
+  unlockBodyScroll();
 }
 
 function renderIncidentDrawerContent(data) {
@@ -2493,14 +2637,26 @@ function setupEventListeners() {
   const sidebarRight = document.getElementById('sidebar-right');
   const btnCollapse = document.getElementById('btn-collapse-sidebar');
   const btnExpand = document.getElementById('btn-expand-sidebar');
+  const appContainer = document.getElementById('app-container');
 
   btnCollapse.addEventListener('click', () => {
     sidebarRight.classList.add('collapsed');
+    appContainer?.classList.add('sidebar-right-collapsed');
+    sessionStorage.setItem('bms_sidebar_collapsed', 'true');
   });
 
   btnExpand.addEventListener('click', () => {
     sidebarRight.classList.remove('collapsed');
+    appContainer?.classList.remove('sidebar-right-collapsed');
+    sessionStorage.removeItem('bms_sidebar_collapsed');
   });
+
+  // Restore collapsed state on load
+  const savedCollapsed = sessionStorage.getItem('bms_sidebar_collapsed');
+  if (savedCollapsed === 'true' && sidebarRight) {
+    sidebarRight.classList.add('collapsed');
+    appContainer?.classList.add('sidebar-right-collapsed');
+  }
 
   // Panel Tab Switching
   document.querySelectorAll('.panel-tab').forEach(tab => {
@@ -2760,8 +2916,12 @@ function setupEventListeners() {
   });
 }
 
+const ACTIVE_VIEW_KEY = 'bms_active_view';
+let _activateView = null;
+
 /**
  * Manages tab switching between Dashboard, Devices, Map, Alerts, Reports, and Settings
+ * View aktif disimpan ke localStorage agar reload tidak selalu balik ke Dashboard.
  */
 function setupNavNavigation() {
   const navItems = document.querySelectorAll('.nav-item');
@@ -2770,45 +2930,65 @@ function setupNavNavigation() {
   const viewTitle = document.getElementById('view-title');
   const viewSubtitle = document.getElementById('view-subtitle');
 
+  function activateView(view) {
+    const target = Array.from(navItems).find(i => i.dataset.view === view);
+    if (!target) return; // view tersimpan tidak dikenal -> biarkan default
+    const resolved = target.dataset.view;
+
+    navItems.forEach(i => i.classList.remove('active'));
+    target.classList.add('active');
+
+    // Stop topology auto-refresh when leaving map tab
+    if (resolved !== 'map' && state.topologyRefreshTimer) {
+      clearInterval(state.topologyRefreshTimer);
+      state.topologyRefreshTimer = null;
+    }
+
+    if (resolved === 'dashboard') {
+      dashboardPanel.style.display = 'flex';
+      otherPanel.style.display = 'none';
+      viewTitle.textContent = 'Network Operations Center Overview';
+      viewSubtitle.textContent = 'Dynamic multi-router telemetry stream & auto-discovery matrix (1s resolution)';
+    } else {
+      dashboardPanel.style.display = 'none';
+      otherPanel.style.display = 'flex';
+      renderSecondaryView(resolved, otherPanel, viewTitle, viewSubtitle);
+
+      // Start topology auto-refresh when entering map tab (every 60s)
+      if (resolved === 'map') {
+        if (state.topologyRefreshTimer) clearInterval(state.topologyRefreshTimer);
+        state.topologyRefreshTimer = setInterval(() => {
+          if (document.getElementById('topology-canvas')) {
+            loadTopology(true); // force re-render
+          } else {
+            clearInterval(state.topologyRefreshTimer);
+            state.topologyRefreshTimer = null;
+          }
+        }, 60000); // 60 detik
+      }
+    }
+  }
+
   navItems.forEach(item => {
     item.addEventListener('click', (e) => {
-      navItems.forEach(i => i.classList.remove('active'));
-      const target = e.currentTarget;
-      target.classList.add('active');
-
-      const view = target.dataset.view;
-
-      // Stop topology auto-refresh when leaving map tab
-      if (view !== 'map' && state.topologyRefreshTimer) {
-        clearInterval(state.topologyRefreshTimer);
-        state.topologyRefreshTimer = null;
-      }
-
-      if (view === 'dashboard') {
-        dashboardPanel.style.display = 'flex';
-        otherPanel.style.display = 'none';
-        viewTitle.textContent = 'Network Operations Center Overview';
-        viewSubtitle.textContent = 'Dynamic multi-router telemetry stream & auto-discovery matrix (1s resolution)';
-      } else {
-        dashboardPanel.style.display = 'none';
-        otherPanel.style.display = 'flex';
-        renderSecondaryView(view, otherPanel, viewTitle, viewSubtitle);
-
-        // Start topology auto-refresh when entering map tab (every 60s)
-        if (view === 'map') {
-          if (state.topologyRefreshTimer) clearInterval(state.topologyRefreshTimer);
-          state.topologyRefreshTimer = setInterval(() => {
-            if (document.getElementById('topology-canvas')) {
-              loadTopology(true); // force re-render
-            } else {
-              clearInterval(state.topologyRefreshTimer);
-              state.topologyRefreshTimer = null;
-            }
-          }, 60000); // 60 detik
-        }
-      }
+      const view = e.currentTarget.dataset.view;
+      activateView(view);
+      try { localStorage.setItem(ACTIVE_VIEW_KEY, view); } catch (err) { /* storage disabled */ }
     });
   });
+
+  _activateView = activateView;
+}
+
+/**
+ * Pulihkan view terakhir setelah reload. Dipanggil SETELAH data dimuat supaya
+ * view sekunder (Reports/Readiness/Map) punya datanya saat di-render.
+ */
+function restoreLastView() {
+  if (!_activateView) return;
+  let saved = null;
+  try { saved = localStorage.getItem(ACTIVE_VIEW_KEY); } catch (err) { return; }
+  if (saved && saved !== 'dashboard') _activateView(saved);
 }
 
 /**
@@ -2912,7 +3092,7 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
     titleEl.textContent = 'Device Inventory & Telegraf Config Manager';
     subtitleEl.textContent = 'Manage device pool, SNMP credentials, and auto-generated Telegraf configurations';
     container.innerHTML = `
-      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:20px;">
+      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:20px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
           <h3 style="font-family:var(--font-display);">Registered Target Pool</h3>
           <button class="btn-action" onclick="document.getElementById('modal-device').classList.add('active')">+ Add Device</button>
@@ -2952,7 +3132,7 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
     titleEl.textContent = 'Interactive Network Topology Map';
     subtitleEl.textContent = 'LLDP/CDP/MNDP-discovered nodes and connectivity edges';
     container.innerHTML = `
-      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:20px;">
+      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:20px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:8px;">
           <div>
             <h3 style="font-family:var(--font-display); font-size:1.05rem; margin:0;">Network Topology Graph</h3>
@@ -2963,14 +3143,14 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
               <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#10b981; margin-right:4px;"></span>Online</span>
               <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#f59e0b; margin-right:4px;"></span>Warning</span>
               <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#ef4444; margin-right:4px;"></span>Offline</span>
-              <span><span style="display:inline-block; width:10px; height:10px; border:2px dashed #64748b; background:transparent; margin-right:4px;"></span>Unmanaged</span>
+              <span><span style="display:inline-block; width:10px; height:10px; border:2px dashed #a8b6c8; background:transparent; margin-right:4px;"></span>Unmanaged</span>
               <span><span style="display:inline-block; width:16px; height:0; border-top:2px dashed #ef4444; vertical-align:middle; margin-right:4px;"></span>Terputus</span>
             </div>
             <button class="btn-secondary" id="btn-topology-rescan" style="font-size:0.75rem;" title="Scan ulang kondisi device & cari LLDP baru. Link yang tak terlihat tetap tampil merah.">Rescan</button>
             <button class="btn-secondary btn-danger" id="btn-topology-reset" style="font-size:0.75rem;" title="Hapus SEMUA link lalu discovery dari nol. Override manual IPv4 dipertahankan.">Reset &amp; Rescan</button>
           </div>
         </div>
-        <div id="topology-canvas" style="width:100%; height:600px; border:1px solid var(--border-subtle); border-radius:8px; background:var(--bg-base); position:relative;">
+        <div id="topology-canvas" style="width:100%; height:600px; border:1px solid var(--border-subtle); border-radius:var(--radius-sm); background:var(--bg-base); position:relative;">
           <div id="topology-empty" style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--text-muted);">
             <div style="font-size:1.1rem; margin-bottom:8px;">No topology data yet</div>
             <div style="font-size:0.85rem;">Click <strong>Rescan</strong> to discover LLDP/CDP neighbors from your devices.</div>
@@ -3042,7 +3222,7 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
     titleEl.textContent = 'Performance & Availability Reports';
     subtitleEl.textContent = 'Monthly SLA metrics, availability scores, and exportable traffic summaries';
     container.innerHTML = `
-      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:24px;">
+      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:24px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:12px;">
           <div>
             <h3 style="font-family:var(--font-display);">30-Day SLA Availability: <span id="reports-sla-text" style="color:var(--color-online);">--</span></h3>
@@ -3051,17 +3231,17 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
           <button class="btn-action" onclick="exportSlaCsv()">Export CSV Report</button>
         </div>
         <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:16px;">
-          <div style="background:var(--bg-surface-elevated); padding:16px; border-radius:8px;">
+          <div style="background:var(--bg-surface-elevated); padding:16px; border-radius:var(--radius-sm);">
             <div style="font-size:0.75rem; color:var(--text-muted);">Total Ingestion Points (24h)</div>
             <div style="font-size:1.4rem; font-weight:700; font-family:var(--font-display); color:var(--color-brand); margin-top:4px;" id="reports-ingestion">--</div>
             <div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;" id="reports-ingestion-src">loading…</div>
           </div>
-          <div style="background:var(--bg-surface-elevated); padding:16px; border-radius:8px;">
+          <div style="background:var(--bg-surface-elevated); padding:16px; border-radius:var(--radius-sm);">
             <div style="font-size:0.75rem; color:var(--text-muted);">Average Latency Across Pool</div>
             <div style="font-size:1.4rem; font-weight:700; font-family:var(--font-display); color:var(--color-online); margin-top:4px;" id="reports-avg-latency">--</div>
             <div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;" id="reports-latency-src">loading…</div>
           </div>
-          <div style="background:var(--bg-surface-elevated); padding:16px; border-radius:8px;">
+          <div style="background:var(--bg-surface-elevated); padding:16px; border-radius:var(--radius-sm);">
             <div style="font-size:0.75rem; color:var(--text-muted);">Cumulative Packet Loss</div>
             <div style="font-size:1.4rem; font-weight:700; font-family:var(--font-display); color:var(--color-warning); margin-top:4px;" id="reports-avg-loss">--</div>
             <div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;" id="reports-loss-src">loading…</div>
@@ -3069,7 +3249,7 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
         </div>
 
         <h4 style="font-family:var(--font-display); margin:24px 0 12px;">Daily Uptime Breakdown (30 Days)</h4>
-        <div id="reports-daily-table" style="max-height:340px; overflow-y:auto; border:1px solid var(--border-subtle); border-radius:8px;">
+        <div id="reports-daily-table" style="max-height:340px; overflow-y:auto; border:1px solid var(--border-subtle); border-radius:var(--radius-sm);">
           <div style="padding:20px; text-align:center; color:var(--text-muted);">Loading historical data…</div>
         </div>
       </div>
@@ -3081,10 +3261,10 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
 
     // Initial loading state
     container.innerHTML = `
-      <div id="influx-status-card" style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:20px; margin-bottom:16px;">
+      <div id="influx-status-card" style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:20px; margin-bottom:16px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
           <h3 style="font-family:var(--font-display); font-size:0.95rem;">InfluxDB Connectivity</h3>
-          <span id="influx-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:6px; background:rgba(100,100,100,0.15); color:var(--text-muted);">Checking...</span>
+          <span id="influx-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:var(--radius-sm); background:rgba(100,100,100,0.15); color:var(--text-muted);">Checking...</span>
         </div>
         <div id="influx-details" style="font-size:0.78rem; color:var(--text-secondary); line-height:1.6;">
           <div>URL: <span id="influx-url">--</span></div>
@@ -3094,13 +3274,13 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
         <div style="display:flex; gap:8px; margin-top:14px;">
           <button class="btn-secondary" onclick="testInfluxConnection()">Test Connection</button>
         </div>
-        <div id="influx-hint" style="margin-top:12px; padding:10px; border-radius:6px; font-size:0.75rem; display:none;"></div>
+        <div id="influx-hint" style="margin-top:12px; padding:10px; border-radius:var(--radius-sm); font-size:0.75rem; display:none;"></div>
       </div>
 
-      <div id="telegraf-status-card" style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:20px; margin-bottom:16px;">
+      <div id="telegraf-status-card" style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:20px; margin-bottom:16px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
           <h3 style="font-family:var(--font-display); font-size:0.95rem;">Telegraf Agent Status</h3>
-          <span id="telegraf-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:6px; background:rgba(100,100,100,0.15); color:var(--text-muted);">Checking...</span>
+          <span id="telegraf-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:var(--radius-sm); background:rgba(100,100,100,0.15); color:var(--text-muted);">Checking...</span>
         </div>
         <div id="telegraf-details" style="font-size:0.78rem; color:var(--text-secondary); line-height:1.6;">
           <div>Real PID: <span id="telegraf-pid">--</span></div>
@@ -3111,13 +3291,13 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
           <button class="btn-secondary" onclick="regenerateTelegrafConfigs()">Regenerate All Configs</button>
           <button class="btn-action" onclick="window.open('scripts-not-applicable','_self')" id="telegraf-restart-hint" style="font-size:0.75rem;">View Restart Instructions</button>
         </div>
-        <div id="telegraf-hint" style="margin-top:12px; padding:10px; border-radius:6px; font-size:0.75rem; display:none;"></div>
+        <div id="telegraf-hint" style="margin-top:12px; padding:10px; border-radius:var(--radius-sm); font-size:0.75rem; display:none;"></div>
       </div>
 
-      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:24px; max-width:640px;">
+      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:24px; max-width:640px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
           <h3 style="font-family:var(--font-display);">Time-Series Database (InfluxDB v2)</h3>
-          <span id="cfg-db-status-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:6px; background:rgba(16,185,129,0.15); color:var(--color-online);">Checking DB...</span>
+          <span id="cfg-db-status-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:var(--radius-sm); background:rgba(16,185,129,0.15); color:var(--color-online);">Checking DB...</span>
         </div>
 
         <div class="form-group" style="margin-bottom:12px;">
@@ -3151,7 +3331,7 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
           <button class="btn-secondary" onclick="testInfluxConnection()">Test InfluxDB Connection</button>
           <button class="btn-action" onclick="saveSettings()">Save Settings</button>
         </div>
-        <div id="settings-result" style="margin-top:14px; font-size:0.8rem; display:none; padding:10px; border-radius:6px;"></div>
+        <div id="settings-result" style="margin-top:14px; font-size:0.8rem; display:none; padding:10px; border-radius:var(--radius-sm);"></div>
       </div>
     `;
 
@@ -3226,20 +3406,20 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
     titleEl.textContent = 'Activity Log';
     subtitleEl.textContent = 'Real-time device event stream from polling agents';
     container.innerHTML = `
-      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:16px;">
+      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:16px;">
         <div class="alerts-page-toolbar" style="margin-bottom:12px;">
           <div class="alerts-page-search">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input type="text" id="activity-search-input" placeholder="Search events...">
           </div>
           <div style="display:flex; gap:8px;">
-            <select id="activity-severity-filter" style="background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:6px; padding:4px 8px; font-size:0.75rem; color:var(--text-primary);">
+            <select id="activity-severity-filter" style="background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:var(--radius-sm); padding:4px 8px; font-size:0.75rem; color:var(--text-primary);">
               <option value="all">All Severity</option>
               <option value="critical">Critical</option>
               <option value="warning">Warning</option>
               <option value="info">Info</option>
             </select>
-            <select id="activity-device-filter" style="background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:6px; padding:4px 8px; font-size:0.75rem; color:var(--text-primary);">
+            <select id="activity-device-filter" style="background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:var(--radius-sm); padding:4px 8px; font-size:0.75rem; color:var(--text-primary);">
               <option value="all">All Devices</option>
             </select>
           </div>
@@ -4064,19 +4244,14 @@ function renderTopologyGraph(data) {
     return {
       id: n.id,
       label: n.label + (n.ip ? '\n' + n.ip : ''),
-      color: {
-        background: staleNode ? 'rgba(239,68,68,0.10)' : (n.color || '#64748b'),
-        border: staleNode ? '#ef4444' : (isUnmanaged ? '#94a3b8' : (n.color || '#64748b')),
-        highlight: { background: n.color || '#64748b', border: '#ffffff' }
-      },
-      shape: isUnmanaged ? 'box' : 'dot',
-      size: isUnmanaged ? 18 : 22,
+      shape: 'image',
+      image: deviceIconDataUri(n.type || (isUnmanaged ? 'unmanaged' : 'unknown'), staleNode ? '#ef4444' : (isUnmanaged ? '#94a3b8' : (n.color || '#a8b6c8')), isUnmanaged ? 26 : 30),
+      size: isUnmanaged ? 26 : 30,
+      shapeProperties: { useImageSize: true },
       font: { color: staleNode ? '#ef4444' : '#f8fafc', size: 11, face: 'Inter, sans-serif', multi: true },
-      borderWidth: isUnmanaged ? 2 : 1,
-      borderDashes: isUnmanaged ? [4, 4] : false,
       title: isUnmanaged
         ? `Unmanaged device${staleNode ? '\n⚠ TERPUTUS (tidak terlihat di discovery terakhir)' : ''}\nHostname: ${n.label}\nIP: ${n.ip || 'unknown'}\nClick to add this device`
-        : `Device: ${n.label}\nIP: ${n.ip}\nStatus: ${n.status}\nType: ${n.type}\nClick to view details`
+        : `Device: ${n.label}\nIP: ${n.ip}\nStatus: ${n.status}\nType: ${deviceTypeLabel(n.type)}\nClick to view details`
     };
   });
 
@@ -4173,7 +4348,7 @@ function showUnmanagedDeviceInfo(unmanagedId) {
     : '<div style="font-size:0.75rem; color:var(--text-muted); margin-top:4px;">No connection info available</div>';
 
   modal.innerHTML = `
-    <div style="background:var(--bg-surface); border:1px solid var(--border-highlight); border-radius:12px; max-width:480px; width:90%; box-shadow:0 20px 40px rgba(0,0,0,0.6); overflow:hidden;">
+    <div style="background:var(--bg-surface); border:1px solid var(--border-highlight); border-radius:var(--radius-md); max-width:480px; width:90%; box-shadow:0 20px 40px rgba(0,0,0,0.6); overflow:hidden;">
       <div style="background:var(--bg-surface-elevated); padding:16px 20px; border-bottom:1px solid var(--border-subtle); display:flex; justify-content:space-between; align-items:center;">
         <div style="font-family:var(--font-display); font-size:1rem; font-weight:600;">Unmanaged Device</div>
         <button id="unmanaged-close" style="background:transparent; border:none; color:var(--text-muted); font-size:1.4rem; cursor:pointer;">&times;</button>
@@ -4187,7 +4362,7 @@ function showUnmanagedDeviceInfo(unmanagedId) {
         <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border-subtle);">
           ${sourceInfo}
         </div>
-        <div style="margin-top:16px; padding:12px; background:rgba(37,150,190,0.05); border:1px solid rgba(37,150,190,0.2); border-radius:6px; font-size:0.75rem; color:var(--text-muted); line-height:1.5;">
+        <div style="margin-top:16px; padding:12px; background:rgba(37,150,190,0.05); border:1px solid rgba(37,150,190,0.2); border-radius:var(--radius-sm); font-size:0.75rem; color:var(--text-muted); line-height:1.5;">
           This device was discovered via LLDP/CDP but is not yet registered in BMS IT Monitoring. Add it to start monitoring.
         </div>
       </div>

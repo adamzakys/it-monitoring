@@ -31,7 +31,7 @@ function ensureConfDir() {
   round_interval = true
   metric_batch_size = 1000
   metric_buffer_limit = 10000
-  collection_jitter = "0s"
+  collection_jitter = "500ms"
   flush_interval = "1s"
   flush_jitter = "0s"
   precision = "1s"
@@ -43,13 +43,15 @@ function ensureConfDir() {
   bucket = "${influxBucket}"
 `;
 
-  // Detect token drift: kalau token di .env berbeda dari token di file,
-  // rewrite supaya telegraf agent selalu pakai token terbaru
+  // Detect drift: rewrite kalau token berbeda ATAU nilai collection_jitter
+  // masih versi lama ("0s" membuat semua input menembak di detik yang sama,
+  // sehingga sampling ICMP 1s bertabrakan dengan poll SNMP 5s).
   let needRewrite = true;
   try {
     if (fs.existsSync(outputConfPath)) {
       const existing = fs.readFileSync(outputConfPath, 'utf8');
-      if (existing.includes(`token = "${influxToken}"`)) {
+      if (existing.includes(`token = "${influxToken}"`) &&
+          existing.includes('collection_jitter = "500ms"')) {
         needRewrite = false;
       }
     }
@@ -99,11 +101,14 @@ function buildTelegrafConfig(device) {
 # =====================================================================
 
 # 1. ICMP Ping Poller (1s interval — fast detection)
+# count=3 + ping_interval=0.25 -> minimum/average/maximum_response_ms adalah
+# statistik NYATA dari 3 probe (sebelumnya count=1 membuat min=avg=max dan
+# standard_deviation_ms selalu 0, sehingga min/avg/max tidak bermakna).
 [[inputs.ping]]
   interval = "1s"
   urls = ["${device.ip_address}"]
-  count = 1
-  ping_interval = 1.0
+  count = 3
+  ping_interval = 0.25
   # Telegraf inputs.ping typing: Timeout=float seconds, Deadline=int seconds.
   # integer timeout or float deadline makes TOML unmarshal fail on restart.
   timeout = 2.0

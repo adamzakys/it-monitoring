@@ -175,6 +175,8 @@ async function runTick() {
       inMbps: subMetric.inMbps,
       outMbps: subMetric.outMbps,
       latency: subMetric.latency,
+      latencyMin: subMetric.latencyMin,
+      latencyMax: subMetric.latencyMax,
       packetLoss: subMetric.packetLoss,
       status: subMetric.status
     }));
@@ -185,6 +187,8 @@ async function runTick() {
         type: 'DEVICE_TELEMETRY',
         deviceId: devId,
         latency: m.latency,
+        latencyMin: m.latencyMin,
+        latencyMax: m.latencyMax,
         packetLoss: m.packetLoss,
         status: m.status
       }));
@@ -504,6 +508,8 @@ async function generateOrFetchMetrics(device, interfaceName) {
         inMbps: realData.in_mbps,
         outMbps: realData.out_mbps,
         latency: realData.latency_ms,
+        latencyMin: realData.latency_min,
+        latencyMax: realData.latency_max,
         packetLoss: realData.packet_loss,
         has_data: true
       };
@@ -541,6 +547,9 @@ async function generateOrFetchMetrics(device, interfaceName) {
     inMbps,
     outMbps,
     latency: pingResult.latency_ms,
+    // Fallback ICMP hanya 1 probe, jadi min/avg/max memang identik.
+    latencyMin: pingResult.latency_ms,
+    latencyMax: pingResult.latency_ms,
     packetLoss: pingResult.packet_loss,
     has_data: false
   };
