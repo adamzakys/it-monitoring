@@ -5,9 +5,13 @@
  */
 const db = require('../../db');
 const eventLogger = require('../eventLogger');
+const threatRules = require('../threatRules');
 const { evaluate } = require('./rules');
 
 const RING_MAX = 1000;
+// Batas penyimpanan raw. Dinaikkan dari 8192 ke 64 KiB supaya pesan panjang
+// tidak terpotong jauh; kolom `message` tetap dibatasi 4000 (turunan, bukan raw).
+const MAX_RAW_STORE = 65536;
 let ring = [];
 let ringSeq = 0;
 const corrThrottle = new Map(); // deviceId:ruleId -> lastEmitAt
@@ -64,12 +68,15 @@ function toPublic(row) {
     facility: row.facility || null,
     severity: row.severity || 'info',
     program: row.program || null,
+    topics: row.topics || null,
+    category: row.category || null,
     message: row.message || '',
     rawMessage: row.raw_message || null,
     correlatedEventType: row.correlated_event_type || null,
     correlatedAt: row.correlated_at || null,
     deviceTimestamp: row.device_timestamp || null,
-    receivedAt: row.received_at || null
+    receivedAt: row.received_at || null,
+    threatKey: row.threat_key || null
   };
 }
 
@@ -79,8 +86,20 @@ function toPublic(row) {
  *     severity, program, message, raw, deviceTimestamp }
  */
 async function insertLog(n) {
+  // Topics: pakai hasil normalizer bila ada; kalau tidak, turunkan dari raw.
+  // Sebelumnya array ini dibuang di sini sehingga kategori asli perangkat
+  // hilang dari database (hanya tersisa di dalam raw_message).
+  const topics = threatRules.normalizeTopics(
+    (Array.isArray(n.topics) && n.topics.length > 0)
+      ? n.topics
+      : threatRules.deriveTopicsFromRaw(n.raw || n.message)
+  );
   const rec = {
     deviceId: n.deviceId ?? null,
+    // Nama device ikut disertakan agar engine threat (dan event yang
+    // dipancarkannya) tidak kehilangan identitas device. Kolom ini tidak
+    // disimpan di device_logs — hanya dipakai di memori/return value.
+    deviceName: n.deviceName || null,
     sourceIp: n.sourceIp || null,
     sourceType: n.sourceType || 'syslog',
     transport: n.transport || null,
@@ -88,9 +107,12 @@ async function insertLog(n) {
     severity: n.severity || 'info',
     program: n.program || null,
     message: String(n.message || '').slice(0, 4000),
-    rawMessage: String(n.raw || n.message || '').slice(0, 8192),
+    rawMessage: String(n.raw || n.message || '').slice(0, MAX_RAW_STORE),
     deviceTimestamp: n.deviceTimestamp || n.device_timestamp || null
   };
+  rec.topics = topics.join(',') || null;
+  rec.category = threatRules.deriveCategory({ ...rec, topics });
+  rec.threatKey = null;
 
   // LAPISAN 2 — korelasi: raw disimpan dulu, rule hanya menambah Event bila
   // match (di-throttle 60s per device+rule agar log berulang tidak spam).
@@ -117,12 +139,14 @@ async function insertLog(n) {
       const r = await db.query(
         `INSERT INTO device_logs
            (device_id, source_ip, source_type, transport, facility, severity,
-            program, message, raw_message, correlated_event_type, correlated_at, device_timestamp)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            program, message, raw_message, correlated_event_type, correlated_at, device_timestamp,
+            topics, category)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          RETURNING id`,
         [rec.deviceId, rec.sourceIp, rec.sourceType, rec.transport, rec.facility,
           rec.severity, rec.program, rec.message, rec.rawMessage,
-          rec.correlatedEventType || null, rec.correlatedAt || null, rec.deviceTimestamp]
+          rec.correlatedEventType || null, rec.correlatedAt || null, rec.deviceTimestamp,
+          rec.topics, rec.category]
       );
       pgId = r.rows[0].id;
     } catch (e) {

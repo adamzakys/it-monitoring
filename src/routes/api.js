@@ -557,10 +557,11 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
 
     const uptime = pick(systemMetrics.sys_uptime_ticks, rtSys ? rtSys.sys_uptime_ticks : null);
     const cpu = pick(systemMetrics.cpu_load_pct, rtSys ? rtSys.cpu_load_pct : null);
-    const memory = pick(systemMetrics.memory_total, rtSys ? rtSys.memory_total_bytes : null);
-    const memoryUsed = pick(systemMetrics.memory_used, rtSys ? rtSys.memory_used_bytes : null);
 
-    // Storage (unit hrStorage: jumlah unit × alloc_units = bytes).
+    // Storage/memory (unit hrStorage: jumlah unit × alloc_units = bytes).
+    // Satu entri mewakili satu BARIS hrStorageTable. Diklasifikasi per baris
+    // (storage_type tidak unik) supaya mount filesystem tidak tercampur dengan
+    // pseudo-memory, "Virtual memory", dan "Swap space".
     const influxStorageRaw = (systemMetrics.storage_entries || []).filter(e => (e.alloc_units || 0) > 0);
     const rtStorageRaw = ((rtSys && rtSys.storage_entries) || []).filter(e => (e.alloc_units || 0) > 0);
     const storageRaw = influxStorageRaw.length > 0 ? influxStorageRaw : rtStorageRaw;
@@ -571,6 +572,59 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
       used_bytes: (e.used || 0) * e.alloc_units
     });
     const storageEntriesBytes = storageRaw.map(toBytes);
+    const roleOf = influxService.classifyHrStorageEntry;
+    const pctOf = (used, total) => total > 0 ? parseFloat(((used / total) * 100).toFixed(1)) : 0;
+
+    // Memory runtime: total = memori fisik, used = MemTotal - MemAvailable
+    // (lihat influxService.computeHrStorageMemory). Tidak memakai field
+    // Cached/Buffers/Shared dan tidak menjumlahkannya.
+    const memoryEntry = storageEntriesBytes.find(e => roleOf(e) === 'memory');
+    const availableEntry = storageEntriesBytes.find(e => roleOf(e) === 'memory_available');
+    let memory = null;
+    if (memoryEntry && memoryEntry.total_bytes > 0) {
+      const totalBytes = memoryEntry.total_bytes;
+      const availBytes = availableEntry
+        ? (availableEntry.total_bytes > 0 ? availableEntry.total_bytes : availableEntry.used_bytes)
+        : null;
+      const usedBytes = availBytes != null
+        ? Math.max(0, totalBytes - availBytes)
+        : memoryEntry.used_bytes;
+      memory = {
+        supported: true,
+        source: storageSource,
+        total_bytes: totalBytes,
+        used_bytes: usedBytes,
+        used_percent: pctOf(usedBytes, totalBytes),
+        // legacy alias — dikonsumsi UI saat ini
+        pct: pctOf(usedBytes, totalBytes)
+      };
+    }
+
+    // Storage = mount filesystem nyata saja. "/" = Primary Storage.
+    // Mount internal systemd (/run/credentials/*) adalah unit ephemeral
+    // 256 KiB tanpa makna kapasitas → tidak ditampilkan.
+    const mountEntries = storageEntriesBytes
+      .filter(e => roleOf(e) === 'mount' && e.total_bytes > 0 && !/^\/run\/credentials(\/|$)/.test(e.descr))
+      .sort((a, b) => (a.descr === '/' ? -1 : b.descr === '/' ? 1 : a.descr.localeCompare(b.descr)));
+
+    const swapEntry = storageEntriesBytes.find(e => roleOf(e) === 'swap');
+    const swap = (swapEntry && swapEntry.total_bytes > 0)
+      ? {
+          supported: true, source: storageSource,
+          total_bytes: swapEntry.total_bytes, used_bytes: swapEntry.used_bytes,
+          used_percent: pctOf(swapEntry.used_bytes, swapEntry.total_bytes)
+        }
+      : { supported: false, reason: 'Perangkat tidak melaporkan swap via hrStorage (HOST-RESOURCES)', source: null };
+
+    // hrStorageVirtualMemory = RAM + swap. Bukan storage, hanya diekspos
+    // sebagai konteks (bukan kartu "Storage — Virtual memory").
+    const virtualEntry = storageEntriesBytes.find(e => roleOf(e) === 'virtual_memory');
+    const virtualMemory = (virtualEntry && virtualEntry.total_bytes > 0)
+      ? {
+          total_bytes: virtualEntry.total_bytes, used_bytes: virtualEntry.used_bytes,
+          used_percent: pctOf(virtualEntry.used_bytes, virtualEntry.total_bytes)
+        }
+      : null;
 
     // sys_uptime_human — kompatibel dgn konsumen lama.
     let sysUptimeHuman = null;
@@ -591,7 +645,7 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
       : { supported: false, reason: reason || noDataReason, source: null };
 
     const system = {
-      has_data: !!(uptime || cpu || memory || storageEntriesBytes.length > 0 || systemMetrics.has_data),
+      has_data: !!(uptime || cpu || memory || mountEntries.length > 0 || systemMetrics.has_data),
       source: systemMetrics.sys_uptime_ticks != null || systemMetrics.cpu_load_pct != null || influxStorageRaw.length > 0
         ? 'influx'
         : (rtSys ? 'snmp' : null),
@@ -605,16 +659,18 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
       // Struktur baru (vendor-agnostic): tiap metrik { supported, value, source }.
       uptime: metric(uptime),
       cpu_load_pct: metric(cpu, true, 'CPU load tidak tersedia (tidak ada hrProcessorLoad/telegraf)'),
-      memory: memory && memoryUsed
+      memory: memory || { supported: false, reason: noDataReason, source: null },
+      // Storage = mount filesystem nyata; "/" sebagai Primary Storage.
+      storage: mountEntries.length > 0
         ? {
-            supported: true, source: memory.source,
-            total_bytes: memory.value, used_bytes: memoryUsed.value,
-            pct: memory.value > 0 ? parseFloat(((memoryUsed.value / memory.value) * 100).toFixed(1)) : 0
+            supported: true, source: storageSource,
+            primary: mountEntries.find(e => e.descr === '/') || mountEntries[0],
+            entries: mountEntries
           }
-        : { supported: false, reason: noDataReason, source: null },
-      storage: storageEntriesBytes.length > 0
-        ? { supported: true, source: storageSource, entries: storageEntriesBytes }
-        : { supported: false, reason: 'Perangkat tidak melaporkan storage via hrStorage (HOST-RESOURCES)', source: null },
+        : { supported: false, reason: 'Perangkat tidak melaporkan filesystem via hrStorage (HOST-RESOURCES)', source: null },
+      // Swap dipisah dari Storage (hrStorageVirtualMemory), bukan kartu storage.
+      swap,
+      virtual_memory: virtualMemory,
       temperature_c: { supported: false, reason: 'Sensor suhu tidak dilaporkan perangkat via SNMP (HOST-RESOURCES/health kosong)', source: null },
       battery: { supported: false, reason: 'Perangkat tidak melaporkan baterai/UPS (UPS-MIB tidak tersedia)', source: null },
       unsupported: []
@@ -768,6 +824,90 @@ router.get('/devices/:id/logs', async (req, res) => {
     const after = parseInt(req.query.after, 10) || 0;
     const logs = await logStore.getLogs(id, limit, after);
     res.json({ success: true, device_id: id, logs, source: 'device_logs' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// ============================================================================
+// 3a3. BMS Threat Timeline — sesi korelasi log
+// ----------------------------------------------------------------------------
+// Mengembalikan incident (sesi korelasi) + event individual yang tidak memiliki
+// rule (fallback), sehingga tidak ada event yang hilang dari tampilan.
+// Poros waktu = received_at (jam server); device_timestamp tetap dikirim dan
+// selisihnya tersedia sebagai clockDriftMs.
+// ============================================================================
+router.get('/devices/:id/threat-timeline', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ success: false, error: 'Invalid device id' });
+  try {
+    const threatTimeline = require('../services/threatTimeline');
+    const includeResolved = String(req.query.includeResolved || '') === 'true';
+    const incidentLimit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+    const looseLimit = Math.min(Math.max(parseInt(req.query.looseLimit, 10) || 50, 0), 200);
+
+    const data = await threatTimeline.getTimelineForDevice(id, {
+      includeResolved,
+      incidentLimit,
+      looseLimit
+    });
+
+    res.json({
+      success: true,
+      device_id: id,
+      source: data.source,
+      time_axis: 'received_at',
+      incident_count: data.incidents.length,
+      loose_count: data.looseEvents.length,
+      incidents: data.incidents,
+      loose_events: data.looseEvents,
+      generated_at: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// 3a4. Detail satu threat incident + seluruh event kronologisnya.
+router.get('/threat-incidents/:key', async (req, res) => {
+  try {
+    const threatTimeline = require('../services/threatTimeline');
+    const incident = await threatTimeline.getIncident(req.params.key);
+    if (!incident) {
+      return res.status(404).json({ success: false, error: 'Threat incident not found' });
+    }
+    res.json({ success: true, incident, event_count: incident.events.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// 3a5. Acknowledge incident (Open → Acknowledged).
+router.post('/threat-incidents/:key/ack', async (req, res) => {
+  try {
+    const threatTimeline = require('../services/threatTimeline');
+    const by = (req.body && req.body.by) || req.headers['x-operator'] || 'operator';
+    const incident = await threatTimeline.ack(req.params.key, by);
+    if (!incident) {
+      return res.status(404).json({ success: false, error: 'Threat incident not found or already handled' });
+    }
+    res.json({ success: true, incident });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// 3a6. Status engine threat + statistik pembuangan log (observabilitas).
+router.get('/threat/status', async (req, res) => {
+  try {
+    const threatTimeline = require('../services/threatTimeline');
+    const syslogSource = require('../services/logCollector/sources/syslog');
+    const data = await threatTimeline.status();
+    res.json({
+      success: true,
+      ...data,
+      syslog_dropped: typeof syslogSource.droppedStats === 'function' ? syslogSource.droppedStats() : null
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
   }

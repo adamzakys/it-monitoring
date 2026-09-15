@@ -45,6 +45,9 @@ const memoryStore = {
     { id: 2, device_id: 2, interface_name: 'enp0s3', status: 'up', speed_bps: 1000000000, in_octets_rate: 0, out_octets_rate: 0 }
   ],
   alerts: [],
+  // Threat Timeline: sesi korelasi log. Diisi hanya saat mode memori
+  // (PostgreSQL tidak tersedia) — tidak dipakai kalau PG hidup.
+  threat_incidents: [],
   settings: {
     INFLUX_URL: process.env.INFLUX_URL || 'http://127.0.0.1:8086',
     INFLUX_TOKEN: process.env.INFLUX_TOKEN || '',

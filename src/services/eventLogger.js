@@ -8,7 +8,13 @@ const EVENT_TYPES = {
   PACKET_LOSS_HIGH: 'PACKET_LOSS_HIGH',
   CPU_HIGH: 'CPU_HIGH',
   MEMORY_HIGH: 'MEMORY_HIGH',
-  STORAGE_HIGH: 'STORAGE_HIGH'
+  STORAGE_HIGH: 'STORAGE_HIGH',
+  // Threat Timeline — dipisah dua tingkat karena SEVERITY_MAP bersifat tetap
+  // per tipe, sehingga severity asli log tidak perlu dipaksa menjadi warning.
+  THREAT_CRITICAL: 'THREAT_CRITICAL',
+  THREAT_WARNING: 'THREAT_WARNING',
+  THREAT_ACKNOWLEDGED: 'THREAT_ACKNOWLEDGED',
+  THREAT_RESOLVED: 'THREAT_RESOLVED'
 };
 
 const SEVERITY_MAP = {
@@ -19,7 +25,11 @@ const SEVERITY_MAP = {
   PACKET_LOSS_HIGH: 'warning',
   CPU_HIGH: 'warning',
   MEMORY_HIGH: 'warning',
-  STORAGE_HIGH: 'warning'
+  STORAGE_HIGH: 'warning',
+  THREAT_CRITICAL: 'critical',
+  THREAT_WARNING: 'warning',
+  THREAT_ACKNOWLEDGED: 'info',
+  THREAT_RESOLVED: 'info'
 };
 
 const eventInMemory = [];

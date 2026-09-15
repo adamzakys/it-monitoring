@@ -9,7 +9,11 @@ const net = require('net');
 const { parseSyslogLine } = require('../normalizer');
 
 const MAX_MSG = 8192;
+// Batas buffer baris TCP sebelum dipaksa flush. Sebelumnya overflow membuang
+// SELURUH buffer (termasuk baris yang sudah utuh di dalamnya).
+const MAX_LINE_BUFFER = 65536 * 2;
 const rate = new Map(); // ip -> { count, windowStart, dropped }
+let totalDropped = 0;
 
 function allowIp(ip, burst = 200, perSec = 10) {
   const now = Date.now();
@@ -20,6 +24,7 @@ function allowIp(ip, burst = 200, perSec = 10) {
   }
   if (r.count >= burst) {
     r.dropped++;
+    totalDropped++;
     if (r.dropped === 1 || r.dropped % 500 === 0) {
       console.warn(`[SyslogSource] rate-limit: drop burst dari ${ip} (${r.dropped} pesan terbuang)`);
     }
@@ -29,21 +34,39 @@ function allowIp(ip, burst = 200, perSec = 10) {
   return true;
 }
 
+/**
+ * Statistik pembuangan agar tidak ada kehilangan log yang senyap.
+ * Dipakai `logCollector/appStatus` dan bisa ditampilkan di UI.
+ */
+function droppedStats() {
+  const perIp = {};
+  for (const [ip, r] of rate.entries()) {
+    if (r.dropped > 0) perIp[ip] = r.dropped;
+  }
+  return { total: totalDropped, perIp };
+}
+
 function normIp(ip) {
   return ip ? ip.replace(/^::ffff:/, '') : null;
 }
 
 function handleLine(line, meta, onMessage) {
   const text = String(line).trim();
-  if (!text || text.length > MAX_MSG) return;
-  const norm = parseSyslogLine(text);
+  if (!text) return;
+  // Pesan melebihi MAX_MSG TIDAK lagi dibuang. Yang dipotong hanya bagian yang
+  // dipakai parser; `raw` diteruskan utuh dan panjang aslinya dilaporkan,
+  // sehingga tidak ada log yang hilang tanpa jejak.
+  const oversize = text.length > MAX_MSG;
+  const norm = parseSyslogLine(oversize ? text.slice(0, MAX_MSG) : text);
   if (!norm) return;
   onMessage({
     ...norm,
     sourceIp: normIp(meta.sourceIp),
     sourceType: 'syslog',
     transport: meta.transport,
-    raw: text
+    raw: text,
+    rawLength: text.length,
+    rawTruncated: oversize
   });
 }
 
@@ -53,9 +76,7 @@ function start({ port, host, onMessage }) {
     const udp = dgram.createSocket('udp4');
     const tcp = net.createServer((socket) => {
       let buf = '';
-      socket.on('data', (chunk) => {
-        buf += chunk.toString('utf8');
-        if (buf.length > MAX_MSG * 4) buf = '';
+      const flushLines = () => {
         let idx;
         while ((idx = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, idx);
@@ -64,6 +85,23 @@ function start({ port, host, onMessage }) {
           const sourceIp = normIp(socket.remoteAddress);
           if (sourceIp && !allowIp(sourceIp)) continue;
           handleLine(line, { sourceIp, transport: `tcp${port}` }, onMessage);
+        }
+      };
+      socket.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        flushLines();
+        // Overflow buffer: sisa tanpa newline di-flush sebagai satu baris,
+        // TIDAK dibuang. Sebelumnya `buf = ''` menghapus juga baris utuh yang
+        // belum sempat diproses sehingga log hilang tanpa jejak.
+        if (buf.length > MAX_LINE_BUFFER) {
+          const leftover = buf.trim();
+          buf = '';
+          if (leftover) {
+            const sourceIp = normIp(socket.remoteAddress);
+            if (!sourceIp || allowIp(sourceIp)) {
+              handleLine(leftover, { sourceIp, transport: `tcp${port}` }, onMessage);
+            }
+          }
         }
       });
       socket.on('error', () => {});
@@ -118,4 +156,4 @@ function start({ port, host, onMessage }) {
   });
 }
 
-module.exports = { start };
+module.exports = { start, droppedStats };

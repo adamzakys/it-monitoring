@@ -8,6 +8,7 @@
 const syslogSource = require('./sources/syslog');
 const snmpTrapSource = require('./sources/snmpTrap');
 const store = require('./store');
+const threatTimeline = require('../threatTimeline');
 
 let syslogHandle = null;
 let trapHandle = null;
@@ -40,6 +41,13 @@ async function initLogCollector({ broadcast } = {}) {
         if (dev && rec && broadcastFn) {
           try { broadcastFn(dev.id, rec); } catch (e) { /* ignore */ }
         }
+        // Threat Timeline: pengelompokan log menjadi sesi incident. Kegagalan
+        // engine diisolasi agar tidak pernah memutus jalur ingest log.
+        if (rec) {
+          try { await threatTimeline.ingest(rec); } catch (e) {
+            console.warn('[LogCollector] threat ingest error:', e.message);
+          }
+        }
       } catch (e) {
         console.warn('[LogCollector] onMessage error:', e.message);
       }
@@ -60,6 +68,11 @@ async function initLogCollector({ broadcast } = {}) {
           if (dev && rec && broadcastFn) {
             try { broadcastFn(dev.id, rec); } catch (e) { /* ignore */ }
           }
+          if (rec) {
+            try { await threatTimeline.ingest(rec); } catch (e) {
+              console.warn('[LogCollector] threat ingest error (trap):', e.message);
+            }
+          }
         } catch (e) {
           console.warn('[LogCollector] trap onMessage error:', e.message);
         }
@@ -79,6 +92,8 @@ async function initLogCollector({ broadcast } = {}) {
     syslog: { ...syslogHandle },
     snmpTrap: trapHandle ? { started: trapHandle.started, status: trapHandle.status, reason: trapHandle.reason } : null,
     retentionDays: LOG_RETENTION_DAYS,
+    // Pembuangan karena rate-limit dilaporkan, bukan disembunyikan.
+    dropped: syslogSource.droppedStats(),
     getLogs: store.getLogs,
     status: store.status
   };

@@ -561,6 +561,9 @@ function handleWsMessage(msg) {
         updateIncidentBadge();
       }
     }
+  } else if (msg.type === 'THREAT_INCIDENT_UPDATED') {
+    // Threat Timeline: sesi baru / bertambah event → render tanpa refresh.
+    onWsThreatIncident(msg);
   } else if (msg.type === 'INIT_SYNC') {
     // Sinkronisasi awal saat WS connect - hitung ulang ringkasan live
     const devs = msg.devices || [];
@@ -1005,6 +1008,15 @@ function closeDeviceDetail() {
   if (state.charts.detailLoss) { state.charts.detailLoss.destroy(); state.charts.detailLoss = null; }
   state.detailData = null;
   state.detailDeviceId = null;
+
+  // Threat Timeline: bersihkan state + indikator realtime saat panel ditutup.
+  threatState.deviceId = null;
+  threatState.incidents = [];
+  threatState.looseEvents = [];
+  threatState.expanded.clear();
+  const threatLive = document.getElementById('threat-live');
+  if (threatLive) threatLive.className = 'dic-live-dot';
+
   state.detailRttBuffer = { labels: [], min: [], avg: [], max: [] };
   state.detailLossBuffer = { labels: [], values: [] };
   state.detailLastTickAt = 0;
@@ -1123,6 +1135,9 @@ function renderDeviceDetail(data, isRefresh = false) {
 
   // Load events for this device
   loadDeviceEvents(data.device.id);
+
+  // Threat Timeline (sesi korelasi log) untuk device ini
+  loadThreatTimeline(data.device.id);
 
   // Check for active incident
   updateDetailIncidentSection(data.device.id);
@@ -1316,7 +1331,7 @@ function logRowHtml(l) {
   const rawBlock = (l.rawMessage && l.rawMessage !== l.message)
     ? `<div class="dic-log-raw" hidden>${escapeHtml(l.rawMessage)}</div>`
     : '';
-  return `<div class="dic-log-item" data-sev="${escapeHtml(sev)}" title="${t.device ? 'Jam perangkat' : 'Jam server (diterima)'} · klik utk lihat raw">
+  return `<div class="dic-log-item" data-sev="${escapeHtml(sev)}" data-log-id="${escapeHtml(String(l.id))}" title="${t.device ? 'Jam perangkat' : 'Jam server (diterima)'} · klik utk lihat raw">
     <span class="t">${t.label}</span>
     <span class="sev ${sevCls}">${sevTxt}</span>
     <span class="prog">${escapeHtml(l.program || 'system')}</span>
@@ -1333,7 +1348,7 @@ function logRawRowHtml(l) {
   const sevTxt = sev.toUpperCase();
   const raw = l.rawMessage || l.message || '';
   const prefix = `[${escapeHtml(l.sourceType || 'syslog')}${l.transport ? '/' + escapeHtml(l.transport) : ''}]`;
-  return `<div class="dic-log-item dic-log-raw-mode" data-sev="${escapeHtml(sev)}">
+  return `<div class="dic-log-item dic-log-raw-mode" data-sev="${escapeHtml(sev)}" data-log-id="${escapeHtml(String(l.id))}">
     <span class="t" title="${t.device ? 'Jam perangkat' : 'Jam server (diterima)'}">${t.label}</span>
     <span class="sev ${sevCls}">${sevTxt}</span>
     <span class="rawtext"><span class="srcbadge">${prefix}</span>${escapeHtml(raw)}</span>
@@ -1547,6 +1562,257 @@ async function updateDetailIncidentSection(deviceId) {
       </div>
     `;
   }).join('');
+}
+
+/* ============================================================
+   THREAT TIMELINE — kumpulan log dikelompokkan menjadi sesi incident.
+   Data: GET /api/devices/:id/threat-timeline (device_logs + threat_incidents).
+   Realtime: WS type 'THREAT_INCIDENT_UPDATED' — timeline bertambah tanpa refresh.
+   Raw Log tidak pernah disalin: tombol "Raw" memakai baris device_logs yang sama
+   dan menampilkannya dengan logRawRowHtml (isi identik dengan sumbernya).
+   ============================================================ */
+
+const threatState = {
+  deviceId: null,
+  incidents: [],
+  looseEvents: [],
+  // Default 'all': Threat Timeline adalah kronologi, sehingga riwayat sesi yang
+  // sudah auto-resolved tetap terlihat (incident terbuka tetap diurut paling atas
+  // oleh API). Filter "open" tersedia untuk mode pemantauan langsung.
+  statusFilter: 'all',
+  sevFilter: 'all',
+  expanded: new Set()
+};
+
+function threatEventTime(ev) {
+  const iso = ev.deviceTimestamp || ev.receivedAt;
+  const d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d.getTime())) return { label: '--', device: false };
+  return {
+    label: d.toLocaleString('id-ID', { hour12: false }),
+    device: ev.timeBasis === 'device'
+  };
+}
+
+function threatIncidentVisible(inc) {
+  if (threatState.sevFilter !== 'all' && (inc.severity || 'warning') !== threatState.sevFilter) return false;
+  if (threatState.statusFilter === 'open' && inc.status === 'resolved') return false;
+  return true;
+}
+
+async function loadThreatTimeline(deviceId) {
+  if (deviceId == null) return;
+  threatState.deviceId = deviceId;
+  const includeResolved = threatState.statusFilter === 'all' ? 'true' : 'false';
+  const listEl = document.getElementById('threat-list');
+  try {
+    const res = await fetch(
+      `/api/devices/${deviceId}/threat-timeline?includeResolved=${includeResolved}&limit=20&looseLimit=50`
+    ).then(r => r.json());
+
+    if (!res || !res.success) {
+      threatState.incidents = [];
+      threatState.looseEvents = [];
+      if (listEl) listEl.innerHTML = '<div class="dic-empty-state">Gagal memuat threat timeline.</div>';
+      return;
+    }
+    threatState.incidents = res.incidents || [];
+    threatState.looseEvents = res.loose_events || [];
+    renderThreatTimeline();
+  } catch (e) {
+    console.error('Failed to load threat timeline:', e);
+    if (listEl) listEl.innerHTML = '<div class="dic-empty-state">Gagal memuat threat timeline.</div>';
+  }
+}
+
+function threatEventRowHtml(ev) {
+  const t = threatEventTime(ev);
+  const sev = String(ev.severity || 'info');
+  const basis = t.device
+    ? `Jam perangkat${ev.clockDriftMs != null ? ` · drift ${Math.round(ev.clockDriftMs / 60000)}m` : ''}`
+    : 'Jam server (diterima)';
+  const topics = ev.topics
+    ? `<span class="dic-threat-topics" title="Topic asli perangkat">${escapeHtml(ev.topics)}</span>`
+    : '';
+  return `<div class="dic-threat-event">
+    <span class="t" title="${escapeHtml(basis)}">${escapeHtml(t.label)}</span>
+    <span class="sev sev-${escapeHtml(sev)}">${escapeHtml(sev.toUpperCase())}</span>
+    <span class="src">${escapeHtml(ev.sourceType || 'syslog')}${ev.transport ? '/' + escapeHtml(ev.transport) : ''}</span>
+    <span class="cat">${escapeHtml(ev.category || '-')}</span>
+    ${topics}
+    <span class="msg" title="${escapeHtml(ev.message || '')}">${escapeHtml(ev.message || '')}</span>
+    <button type="button" class="dic-threat-raw" data-log-id="${escapeHtml(String(ev.id))}" title="Buka Raw Log asli">Raw</button>
+  </div>`;
+}
+
+function threatIncidentHtml(inc) {
+  const key = String(inc.threatKey || '');
+  const sev = String(inc.severity || 'warning');
+  const expanded = threatState.expanded.has(key);
+  const start = inc.startedAt ? new Date(inc.startedAt).toLocaleString('id-ID', { hour12: false }) : '--';
+  const last = inc.lastEventAt ? new Date(inc.lastEventAt).toLocaleString('id-ID', { hour12: false }) : '--';
+  const rules = (inc.matchedRules || []).map(r => escapeHtml(String(r))).join(', ');
+  const events = inc.events || [];
+  const ackBtn = inc.status === 'open'
+    ? `<button type="button" class="dic-threat-ack" data-ack="${escapeHtml(key)}">Acknowledge</button>`
+    : '';
+  return `<div class="dic-threat-incident sev-${escapeHtml(sev)} status-${escapeHtml(String(inc.status || 'open'))}" data-threat-key="${escapeHtml(key)}">
+    <div class="dic-threat-head">
+      <button type="button" class="dic-threat-toggle" data-toggle="${escapeHtml(key)}" aria-expanded="${expanded ? 'true' : 'false'}">${expanded ? '▾' : '▸'}</button>
+      <span class="dic-threat-title">${escapeHtml(inc.title || 'Threat incident')}</span>
+      <span class="alert-severity-badge ${escapeHtml(sev)}">${escapeHtml(sev.toUpperCase())}</span>
+      <span class="dic-threat-status ${escapeHtml(String(inc.status || 'open'))}">${escapeHtml(String(inc.status || 'open').toUpperCase())}</span>
+    </div>
+    <div class="dic-threat-meta">
+      <span>Mulai: ${escapeHtml(start)}</span>
+      <span>Terakhir: ${escapeHtml(last)}</span>
+      <span>${Number(inc.eventCount) || 0} event</span>
+      ${rules ? `<span title="Rule yang terkonfirmasi">rules: ${rules}</span>` : ''}
+    </div>
+    <div class="dic-threat-events" ${expanded ? '' : 'hidden'}>
+      ${events.length > 0
+        ? events.map(threatEventRowHtml).join('')
+        : '<div class="dic-empty-state">Tidak ada event pada rentang ini.</div>'}
+    </div>
+    <div class="dic-threat-actions">${ackBtn}</div>
+  </div>`;
+}
+
+function renderThreatTimeline() {
+  const listEl = document.getElementById('threat-list');
+  const looseEl = document.getElementById('threat-loose-list');
+  const countEl = document.getElementById('threat-count');
+  const looseCountEl = document.getElementById('threat-loose-count');
+  const hintEl = document.getElementById('threat-hint');
+  if (!listEl) return;
+
+  const visible = threatState.incidents.filter(threatIncidentVisible);
+  if (countEl) countEl.textContent = String(visible.length);
+  if (looseCountEl) looseCountEl.textContent = String(threatState.looseEvents.length);
+
+  if (visible.length === 0) {
+    listEl.innerHTML = '<div class="dic-empty-state">Belum ada threat incident pada rentang ini.</div>';
+  } else {
+    listEl.innerHTML = visible.map(threatIncidentHtml).join('');
+  }
+
+  if (looseEl) {
+    const loose = threatState.looseEvents || [];
+    looseEl.innerHTML = loose.length === 0
+      ? '<div class="dic-empty-state">Semua event sudah dikelompokkan.</div>'
+      : loose.map(ev => {
+        const t = threatEventTime(ev);
+        const sev = String(ev.severity || 'info');
+        return `<div class="dic-threat-event loose">
+          <span class="t" title="${t.device ? 'Jam perangkat' : 'Jam server (diterima)'}">${escapeHtml(t.label)}</span>
+          <span class="sev sev-${escapeHtml(sev)}">${escapeHtml(sev.toUpperCase())}</span>
+          <span class="cat">${escapeHtml(ev.category || '-')}</span>
+          <span class="msg" title="${escapeHtml(ev.message || '')}">${escapeHtml(ev.message || '')}</span>
+          <button type="button" class="dic-threat-raw" data-log-id="${escapeHtml(String(ev.id))}" title="Buka Raw Log asli">Raw</button>
+        </div>`;
+      }).join('');
+  }
+
+  if (hintEl) {
+    hintEl.textContent = 'Urutan memakai jam server (received_at) karena jam perangkat bisa menyimpang; '
+      + 'jam perangkat tetap ditampilkan. Klik "Raw" untuk membuka baris asli di Device Log — tanpa penyalinan.';
+  }
+
+  // Interaksi: expand/collapse, acknowledge, buka raw.
+  listEl.querySelectorAll('[data-toggle]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.toggle;
+      if (threatState.expanded.has(key)) threatState.expanded.delete(key);
+      else threatState.expanded.add(key);
+      renderThreatTimeline();
+    });
+  });
+  listEl.querySelectorAll('[data-ack]').forEach(btn => {
+    btn.addEventListener('click', () => ackThreatIncident(btn.dataset.ack, btn));
+  });
+  document.querySelectorAll('.dic-threat-raw').forEach(btn => {
+    btn.addEventListener('click', () => openRawForThreatEvent(btn.dataset.logId));
+  });
+}
+
+async function ackThreatIncident(key, btn) {
+  if (!key) return;
+  const original = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Acknowledging…'; }
+  try {
+    const res = await fetch(`/api/threat-incidents/${encodeURIComponent(key)}/ack`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ by: 'operator' })
+    }).then(r => r.json());
+    if (res && res.success && res.incident) {
+      const idx = threatState.incidents.findIndex(i => i.threatKey === res.incident.threatKey);
+      if (idx >= 0) {
+        threatState.incidents[idx] = { ...threatState.incidents[idx], ...res.incident };
+      }
+      renderThreatTimeline();
+      return;
+    }
+    if (btn) { btn.disabled = false; btn.textContent = original || 'Acknowledge'; }
+  } catch (e) {
+    console.error('Acknowledge failed:', e);
+    if (btn) { btn.disabled = false; btn.textContent = original || 'Acknowledge'; }
+  }
+}
+
+/** Lompat ke Raw Log asli untuk satu event (tanpa menyalin isi raw). */
+async function openRawForThreatEvent(logId) {
+  if (logId == null || threatState.deviceId == null) return;
+  let entry = deviceLogCache.find(l => String(l.id) === String(logId));
+  if (!entry) {
+    await loadDeviceLogs(threatState.deviceId, false);
+    entry = deviceLogCache.find(l => String(l.id) === String(logId));
+  }
+  if (!entry) return;
+
+  detailLogMode = 'raw';
+  const modeSel = document.getElementById('detail-log-mode');
+  if (modeSel) modeSel.value = 'raw';
+  renderLogList();
+
+  const row = document.querySelector('.dic-log-item[data-log-id="' + String(logId) + '"]');
+  if (row) {
+    row.classList.add('flash');
+    if (typeof row.scrollIntoView === 'function') row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => row.classList.remove('flash'), 1800);
+  }
+}
+
+/** Realtime: sesi threat bertambah/berubah tanpa refresh halaman. */
+function onWsThreatIncident(msg) {
+  if (!isDetailOpen() || threatState.deviceId == null) return;
+  const inc = msg && msg.incident;
+  if (!inc || inc.deviceId !== threatState.deviceId) return;
+
+  const idx = threatState.incidents.findIndex(i => i.threatKey === inc.threatKey);
+  if (idx >= 0) {
+    const prev = threatState.incidents[idx];
+    threatState.incidents[idx] = { ...prev, ...inc, events: prev.events || [] };
+  } else {
+    threatState.incidents.unshift({ ...inc, events: [] });
+  }
+
+  const target = threatState.incidents.find(i => i.threatKey === inc.threatKey);
+  const ev = msg.event;
+  if (target && ev && ev.id != null) {
+    const events = target.events || [];
+    if (!events.some(e => String(e.id) === String(ev.id))) {
+      events.push(ev);
+      events.sort((a, b) => new Date(a.receivedAt || 0) - new Date(b.receivedAt || 0));
+      target.events = events;
+    }
+    threatState.looseEvents = (threatState.looseEvents || [])
+      .filter(e => String(e.id) !== String(ev.id));
+  }
+
+  const live = document.getElementById('threat-live');
+  if (live) live.className = 'dic-live-dot live';
+  renderThreatTimeline();
 }
 
 async function loadDeviceHistory(deviceId) {
@@ -2882,6 +3148,16 @@ function setupEventListeners() {
   document.getElementById('detail-log-mode')?.addEventListener('change', (e) => {
     detailLogMode = (e.target && e.target.value === 'raw') ? 'raw' : 'normalized';
     renderLogList();
+  });
+
+  // Threat Timeline: filter status + severity (server-side untuk status, client-side untuk severity).
+  document.getElementById('threat-filter')?.addEventListener('change', (e) => {
+    threatState.statusFilter = (e.target && e.target.value === 'all') ? 'all' : 'open';
+    if (threatState.deviceId != null) loadThreatTimeline(threatState.deviceId);
+  });
+  document.getElementById('threat-sev')?.addEventListener('change', (e) => {
+    threatState.sevFilter = e.target ? e.target.value : 'all';
+    renderThreatTimeline();
   });
 
   // Detail interface selector → re-point the WS stream to the new interface.
