@@ -1,12 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "a0350390128a7d9166c5029e9617e17daaf5b151",
-    "indexed_at": "2026-10-16T02:55:23Z",
+    "commit": "de6eea4fb1c02bef3cf34bedef62c21e1d466c90",
+    "indexed_at": "2026-10-16T07:51:08Z",
     "project": "home-urzection-Documents-Project-it-monitoring",
-    "nodes": 1492,
-    "edges": 2828,
-    "original_size": 7798784,
-    "compressed_size": 1568152,
-    "compression_level": 3,
-    "reconcile_basis": "git-clean-head"
+    "nodes": 1510,
+    "edges": 2846,
+    "original_size": 7864320,
+    "compressed_size": 1576544,
+    "compression_level": 3
 }
