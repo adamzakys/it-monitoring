@@ -427,13 +427,8 @@ function generateCommands(device, gaps) {
 async function getReadiness(deviceId) {
   let device = null;
 
-  if (db.isPostgresConnected()) {
-    const r = await db.query('SELECT * FROM devices WHERE id = $1', [deviceId]);
-    device = r.rows[0] || null;
-  }
-  if (!device) {
-    device = db.getMemoryStore().devices.find(d => d.id === deviceId) || null;
-  }
+  const r = await db.query('SELECT * FROM devices WHERE id = ?', [deviceId]);
+  device = r.rows[0] || null;
   if (!device) {
     return { success: false, error: 'Device not found' };
   }

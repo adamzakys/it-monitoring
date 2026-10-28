@@ -589,59 +589,33 @@ async function matchNeighbor(sourceDevice, allDevices, neighbor, arpMap) {
 }
 
 /**
- * Get all devices from DB or memory store
+ * Get all devices from DB
  */
 async function getAllDevices() {
-  if (db.isPostgresConnected()) {
-    const r = await db.query('SELECT * FROM devices ORDER BY id ASC');
-    return r.rows;
-  }
-  return db.getMemoryStore().devices;
+  const r = await db.query('SELECT * FROM devices ORDER BY id ASC');
+  return r.rows;
 }
 
 /**
  * Persist a single link to device_links table.
  */
 async function persistLink(link) {
-  if (!db.isPostgresConnected()) {
-    const store = db.getMemoryStore();
-    if (!store.device_links) store.device_links = [];
-    // dedup
-    const existing = store.device_links.find(l =>
-      l.source_device_id === link.source_device_id &&
-      l.source_interface === link.source_interface &&
-      l.target_chassis_id === link.target_chassis_id
-    );
-    if (existing) {
-      Object.assign(existing, link, { last_seen: new Date().toISOString(), stale: false });
-    } else {
-      store.device_links.push({
-        id: Date.now() + Math.random(),
-        ...link,
-        discovered_at: new Date().toISOString(),
-        last_seen: new Date().toISOString(),
-        stale: false
-      });
-    }
-    return;
-  }
-
   await db.query(
     `INSERT INTO device_links (
       source_device_id, source_interface, target_chassis_id, target_sys_name,
       target_port_id, target_port_desc, target_ip, target_device_id,
       protocol, discovered_at, last_seen, stale
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW(), false)
-    ON CONFLICT (source_device_id, source_interface, (COALESCE(target_chassis_id, '')))
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'), 0)
+    ON CONFLICT (source_device_id, source_interface, COALESCE(target_chassis_id, ''))
     DO UPDATE SET
-      target_sys_name = EXCLUDED.target_sys_name,
-      target_port_id = EXCLUDED.target_port_id,
-      target_port_desc = EXCLUDED.target_port_desc,
-      target_ip = EXCLUDED.target_ip,
-      target_device_id = EXCLUDED.target_device_id,
-      protocol = EXCLUDED.protocol,
-      last_seen = NOW(),
-      stale = false`,
+      target_sys_name = excluded.target_sys_name,
+      target_port_id = excluded.target_port_id,
+      target_port_desc = excluded.target_port_desc,
+      target_ip = excluded.target_ip,
+      target_device_id = excluded.target_device_id,
+      protocol = excluded.protocol,
+      last_seen = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+      stale = 0`,
     [
       link.source_device_id,
       link.source_interface,
@@ -661,14 +635,7 @@ async function persistLink(link) {
  * Links that stay stale for too long can be deleted.
  */
 async function markAllLinksStale() {
-  if (!db.isPostgresConnected()) {
-    const store = db.getMemoryStore();
-    if (store.device_links) {
-      for (const l of store.device_links) l.stale = true;
-    }
-    return;
-  }
-  await db.query(`UPDATE device_links SET stale = true WHERE stale = false`);
+  await db.query(`UPDATE device_links SET stale = 1 WHERE stale = 0`);
 }
 
 /**
@@ -895,49 +862,25 @@ async function resetTopology() {
   let overrides = [];
   let removed = 0;
 
-  if (db.isPostgresConnected()) {
-    const r = await db.query(
-      `SELECT source_device_id, source_interface, target_chassis_id, manual_ipv4
-         FROM device_links
-        WHERE manual_ipv4 IS NOT NULL AND target_chassis_id IS NOT NULL`
-    );
-    overrides = r.rows;
-    const d = await db.query('DELETE FROM device_links');
-    removed = d.rowCount || 0;
-  } else {
-    const store = db.getMemoryStore();
-    const all = store.device_links || [];
-    overrides = all
-      .filter(l => l.manual_ipv4 && l.target_chassis_id)
-      .map(l => ({
-        source_device_id: l.source_device_id,
-        source_interface: l.source_interface,
-        target_chassis_id: l.target_chassis_id,
-        manual_ipv4: l.manual_ipv4
-      }));
-    removed = all.length;
-    store.device_links = [];
-  }
+  const r = await db.query(
+    `SELECT source_device_id, source_interface, target_chassis_id, manual_ipv4
+       FROM device_links
+      WHERE manual_ipv4 IS NOT NULL AND target_chassis_id IS NOT NULL`
+  );
+  overrides = r.rows;
+  const d = await db.query('DELETE FROM device_links');
+  removed = d.rowCount || 0;
 
   const discovery = await discoverTopology();
 
   let restored = 0;
   for (const o of overrides) {
-    if (db.isPostgresConnected()) {
-      const u = await db.query(
-        `UPDATE device_links SET manual_ipv4 = $1
-          WHERE source_device_id = $2 AND source_interface = $3 AND target_chassis_id = $4`,
-        [o.manual_ipv4, o.source_device_id, o.source_interface, o.target_chassis_id]
-      );
-      restored += u.rowCount || 0;
-    } else {
-      const store = db.getMemoryStore();
-      const l = (store.device_links || []).find(x =>
-        x.source_device_id === o.source_device_id &&
-        x.source_interface === o.source_interface &&
-        x.target_chassis_id === o.target_chassis_id);
-      if (l) { l.manual_ipv4 = o.manual_ipv4; restored++; }
-    }
+    const u = await db.query(
+      `UPDATE device_links SET manual_ipv4 = ?
+        WHERE source_device_id = ? AND source_interface = ? AND target_chassis_id = ?`,
+      [o.manual_ipv4, o.source_device_id, o.source_interface, o.target_chassis_id]
+    );
+    restored += u.rowCount || 0;
   }
 
   console.log(`[TopologyDiscovery] Reset complete: ${removed} link dihapus, ${discovery.totalLinks || 0} ditemukan, ${restored}/${overrides.length} override manual dipulihkan.`);

@@ -206,17 +206,15 @@ async function createIncident(deviceId, deviceName, severity, eventType, metric)
 
     memoryIncidents.set(deviceId, incident);
 
-    if (db.isPostgresConnected()) {
-      try {
-        await db.query(
-          `INSERT INTO incidents (incident_id, device_id, device_name, current_severity, status, started_at, root_cause, evidence, status_history)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [incidentId, deviceId, deviceName, severity, STATUS.ACTIVE, incident.startedAt, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory)]
-        );
-      } catch (err) {
-        console.error('[IncidentManager] Failed to create incident:', err.message);
-        memoryIncidents.delete(deviceId);
-      }
+    try {
+      await db.query(
+        `INSERT INTO incidents (incident_id, device_id, device_name, current_severity, status, started_at, root_cause, evidence, status_history)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [incidentId, deviceId, deviceName, severity, STATUS.ACTIVE, incident.startedAt, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory)]
+      );
+    } catch (err) {
+      console.error('[IncidentManager] Failed to create incident:', err.message);
+      memoryIncidents.delete(deviceId);
     }
 
     return incident;
@@ -240,15 +238,13 @@ async function updateIncidentSeverity(deviceId, newSeverity, eventType, metric) 
   incident.evidence = createEvidence(metric, incident.evidence);
   addStatusHistoryEntry(incident, eventType, metric);
 
-  if (db.isPostgresConnected()) {
-    try {
-      await db.query(
-        `UPDATE incidents SET current_severity = $1, root_cause = $2, evidence = $3, status_history = $4 WHERE incident_id = $5 AND status = $6`,
-        [newSeverity, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory), incident.incidentId, STATUS.ACTIVE]
-      );
-    } catch (err) {
-      console.error('[IncidentManager] Failed to update incident:', err.message);
-    }
+  try {
+    await db.query(
+      `UPDATE incidents SET current_severity = ?, root_cause = ?, evidence = ?, status_history = ? WHERE incident_id = ? AND status = ?`,
+      [newSeverity, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory), incident.incidentId, STATUS.ACTIVE]
+    );
+  } catch (err) {
+    console.error('[IncidentManager] Failed to update incident:', err.message);
   }
 
   return incident;
@@ -268,15 +264,13 @@ async function closeIncident(deviceId, eventType, metric) {
 
   memoryIncidents.delete(deviceId);
 
-  if (db.isPostgresConnected()) {
-    try {
-      await db.query(
-        `UPDATE incidents SET status = $1, ended_at = $2, duration_ms = $3, root_cause = $4, evidence = $5, status_history = $6 WHERE incident_id = $7`,
-        [STATUS.RESOLVED, incident.endedAt, incident.durationMs, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory), incident.incidentId]
-      );
-    } catch (err) {
-      console.error('[IncidentManager] Failed to close incident:', err.message);
-    }
+  try {
+    await db.query(
+      `UPDATE incidents SET status = ?, ended_at = ?, duration_ms = ?, root_cause = ?, evidence = ?, status_history = ? WHERE incident_id = ?`,
+      [STATUS.RESOLVED, incident.endedAt, incident.durationMs, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory), incident.incidentId]
+    );
+  } catch (err) {
+    console.error('[IncidentManager] Failed to close incident:', err.message);
   }
 
   return incident;
@@ -290,21 +284,19 @@ async function getActiveIncidentForDevice(deviceId) {
     }
   }
 
-  if (db.isPostgresConnected()) {
-    try {
-      const res = await db.query(
-        `SELECT * FROM incidents WHERE device_id = $1 AND status = $2 LIMIT 1`,
-        [deviceId, STATUS.ACTIVE]
-      );
-      if (res.rows.length > 0) {
-        const row = res.rows[0];
-        const incident = parseIncidentRow(row);
-        memoryIncidents.set(deviceId, incident);
-        return incident;
-      }
-    } catch (err) {
-      console.error('[IncidentManager] Failed to get active incident:', err.message);
+  try {
+    const res = await db.query(
+      `SELECT * FROM incidents WHERE device_id = ? AND status = ? LIMIT 1`,
+      [deviceId, STATUS.ACTIVE]
+    );
+    if (res.rows.length > 0) {
+      const row = res.rows[0];
+      const incident = parseIncidentRow(row);
+      memoryIncidents.set(deviceId, incident);
+      return incident;
     }
+  } catch (err) {
+    console.error('[IncidentManager] Failed to get active incident:', err.message);
   }
 
   return null;
@@ -334,36 +326,32 @@ async function getAllActiveIncidents() {
     }
   }
 
-  if (db.isPostgresConnected()) {
-    try {
-      const res = await db.query(
-        `SELECT * FROM incidents WHERE status = $1 ORDER BY started_at DESC`,
-        [STATUS.ACTIVE]
-      );
-      for (const row of res.rows) {
-        if (!active.find(i => i.incidentId === row.incident_id)) {
-          active.push(parseIncidentRow(row));
-        }
+  try {
+    const res = await db.query(
+      `SELECT * FROM incidents WHERE status = ? ORDER BY started_at DESC`,
+      [STATUS.ACTIVE]
+    );
+    for (const row of res.rows) {
+      if (!active.find(i => i.incidentId === row.incident_id)) {
+        active.push(parseIncidentRow(row));
       }
-    } catch (err) {
-      console.error('[IncidentManager] Failed to get active incidents:', err.message);
     }
+  } catch (err) {
+    console.error('[IncidentManager] Failed to get active incidents:', err.message);
   }
 
   return active;
 }
 
 async function getIncidentHistory(limit = 100) {
-  if (db.isPostgresConnected()) {
-    try {
-      const res = await db.query(
-        `SELECT * FROM incidents WHERE status = 'resolved' ORDER BY started_at DESC LIMIT $1`,
-        [limit]
-      );
-      return res.rows.map(parseIncidentRow);
-    } catch (err) {
-      console.error('[IncidentManager] Failed to get incident history:', err.message);
-    }
+  try {
+    const res = await db.query(
+      `SELECT * FROM incidents WHERE status = 'resolved' ORDER BY started_at DESC LIMIT ?`,
+      [limit]
+    );
+    return res.rows.map(parseIncidentRow);
+  } catch (err) {
+    console.error('[IncidentManager] Failed to get incident history:', err.message);
   }
 
   return Array.from(memoryIncidents.values()).slice(0, limit);

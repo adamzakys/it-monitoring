@@ -153,12 +153,8 @@ function memStore() {
 }
 
 async function getOpenSession(deviceId) {
-  if (!db.isPostgresConnected()) {
-    const list = memStore().filter(s => s.deviceId === deviceId && s.status === 'open');
-    return list.length ? list[list.length - 1] : null;
-  }
   const r = await db.query(
-    `SELECT * FROM threat_incidents WHERE device_id = $1 AND status = 'open'
+    `SELECT * FROM threat_incidents WHERE device_id = ? AND status = 'open'
       ORDER BY last_event_at DESC LIMIT 1`,
     [deviceId]
   );
@@ -169,48 +165,25 @@ async function createSession(deviceId, deviceName, atMs, rule, category, topics)
   const threatKey = newThreatKey(deviceId);
   const iso = new Date(atMs).toISOString();
 
-  if (!db.isPostgresConnected()) {
-    const row = {
-      threatKey, deviceId, deviceName, title: rule.title,
-      severity: ruleIncidentSeverity(rule.severity), status: 'open',
-      category, topics: topics.join(','), matchedRules: [rule.id],
-      startedAt: iso, lastEventAt: iso, eventCount: 0,
-      firstLogId: null, lastLogId: null, ackedAt: null, ackedBy: null,
-      resolvedAt: null, autoResolved: false, evidence: {}
-    };
-    memStore().push(row);
-    return row;
-  }
-
   const r = await db.query(
     `INSERT INTO threat_incidents
        (threat_key, device_id, device_name, title, severity, status, category, topics,
         matched_rules, started_at, last_event_at, event_count)
-     VALUES ($1, $2, $3, $4, $5, 'open', $6, $7, $8::jsonb, $9, $9, 0)
+     VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 0)
      RETURNING *`,
     [threatKey, deviceId, deviceName, rule.title, ruleIncidentSeverity(rule.severity),
-      category, topics.join(',') || null, JSON.stringify([rule.id]), iso]
+      category, topics.join(',') || null, JSON.stringify([rule.id]), iso, iso]
   );
   return r.rows[0];
 }
 
 async function closeSession(threatKey, auto = true) {
-  if (!db.isPostgresConnected()) {
-    const row = memStore().find(s => s.threatKey === threatKey);
-    if (row) {
-      row.status = 'resolved';
-      row.resolvedAt = new Date().toISOString();
-      row.autoResolved = auto;
-      return row;
-    }
-    return null;
-  }
   const r = await db.query(
     `UPDATE threat_incidents
-        SET status = 'resolved', resolved_at = NOW(), auto_resolved = $2
-      WHERE threat_key = $1 AND status = 'open'
+        SET status = 'resolved', resolved_at = datetime('now'), auto_resolved = ?
+      WHERE threat_key = ? AND status = 'open'
       RETURNING *`,
-    [threatKey, auto]
+    [auto ? 1 : 0, threatKey]
   );
   return r && r.rows.length ? r.rows[0] : null;
 }
@@ -220,34 +193,15 @@ async function closeSession(threatKey, auto = true) {
  * karena insert-nya sudah selesai sebelum ingest dipanggil).
  */
 async function fetchWindowRows(deviceId, fromMs, toMsValue, limit = MAX_WINDOW_ROWS) {
-  if (!db.isPostgresConnected()) {
-    const store = require('./logCollector/store');
-    const rows = await store.getLogs(deviceId, 500, 0);
-    return (rows || [])
-      .filter(r => {
-        const ms = toMs(r.receivedAt || r.received_at);
-        return ms >= fromMs && ms <= toMsValue;
-      })
-      .map(r => ({
-        id: r.id,
-        message: r.message,
-        severity: r.severity,
-        program: r.program,
-        facility: r.facility,
-        topics: r.topics || null,
-        category: r.category || null,
-        raw_message: r.rawMessage || r.raw_message || '',
-        threat_key: r.threatKey || r.threat_key || null,
-        received_at: r.receivedAt || r.received_at
-      }));
-  }
+  // julianday(): robusta terhadap duet format timestamp (ISO '...T...Z' dari
+  // store.insertLog dan spasi 'YYYY-MM-DD HH:MM:SS' dari DEFAULT CURRENT_TIMESTAMP).
   const r = await db.query(
     `SELECT id, message, severity, program, facility, topics, category,
             raw_message, threat_key, received_at
        FROM device_logs
-      WHERE device_id = $1 AND received_at >= $2 AND received_at <= $3
+      WHERE device_id = ? AND julianday(received_at) >= julianday(?) AND julianday(received_at) <= julianday(?)
       ORDER BY received_at ASC, id ASC
-      LIMIT $4`,
+      LIMIT ?`,
     // Batas atas +1 ms: `received_at` bertimestamp mikrodetik, sedangkan
     // Date di JavaScript hanya milidetik. Tanpa toleransi ini, baris yang
     // sedang diproses akan terpotong dari jendelanya sendiri sehingga sesi
@@ -260,17 +214,20 @@ async function fetchWindowRows(deviceId, fromMs, toMsValue, limit = MAX_WINDOW_R
 async function attachRows(threatKey, ids) {
   const list = [...new Set(ids.filter(id => id != null))];
   if (list.length === 0) return 0;
-  if (!db.isPostgresConnected()) {
-    // Mode memori: ring buffer tidak menyimpan threat_key, jadi hanya jumlah
-    // baris yang dilaporkan — sesi tetap terbentuk, rinciannya ikut ring.
-    return list.length;
-  }
   const r = await db.query(
-    `UPDATE device_logs SET threat_key = $1
-      WHERE id = ANY($2::bigint[]) AND threat_key IS NULL`,
-    [threatKey, list]
+    `UPDATE device_logs SET threat_key = ?
+      WHERE id = ? AND threat_key IS NULL`,
+    [threatKey, list[0]]
   );
-  return r ? r.rowCount || 0 : 0;
+  // Note: SQLite doesn't support ANY(array), so we update one at a time or use IN
+  if (list.length > 1) {
+    const placeholders = list.map(() => '?').join(',');
+    await db.query(
+      `UPDATE device_logs SET threat_key = ? WHERE id IN (${placeholders}) AND threat_key IS NULL`,
+      [threatKey, ...list]
+    );
+  }
+  return list.length;
 }
 
 /**
@@ -279,47 +236,33 @@ async function attachRows(threatKey, ids) {
  * (dipakai sebagai bukti anti-duplikasi).
  */
 async function refreshAggregates(threatKey) {
-  if (!db.isPostgresConnected()) {
-    const row = memStore().find(s => s.threatKey === threatKey);
-    return row || null;
-  }
+  // SQLite UPDATE…FROM memakai penamaan `AS alias` (PG gaya `UPDATE t` tidak valid).
   const r = await db.query(
-    `UPDATE threat_incidents t
+    `UPDATE threat_incidents AS t
         SET event_count  = agg.n,
             first_log_id = agg.first_id,
             last_log_id  = agg.last_id,
             last_event_at = COALESCE(agg.last_at, t.last_event_at)
        FROM (
-         SELECT count(*)::int AS n, min(id) AS first_id, max(id) AS last_id,
+         SELECT count(*) AS n, min(id) AS first_id, max(id) AS last_id,
                 max(received_at) AS last_at
-           FROM device_logs WHERE threat_key = $1
+           FROM device_logs WHERE threat_key = ?
        ) agg
-      WHERE t.threat_key = $1
+      WHERE t.threat_key = ?
       RETURNING *`,
-    [threatKey]
+    [threatKey, threatKey]
   );
   return r && r.rows.length ? r.rows[0] : null;
 }
 
 async function updateSession(threatKey, { rule, category, topics, severity, matchedRules, eventMs }) {
-  if (!db.isPostgresConnected()) {
-    const row = memStore().find(s => s.threatKey === threatKey);
-    if (!row) return null;
-    row.title = rule.title;
-    row.category = category;
-    row.topics = topics.join(',') || null;
-    row.severity = severity;
-    row.matchedRules = matchedRules;
-    row.lastEventAt = new Date(eventMs).toISOString();
-    return row;
-  }
   const r = await db.query(
     `UPDATE threat_incidents
-        SET title = $2, category = $3, topics = $4, severity = $5,
-            matched_rules = $6::jsonb
-      WHERE threat_key = $1
+        SET title = ?, category = ?, topics = ?, severity = ?,
+            matched_rules = ?
+      WHERE threat_key = ?
       RETURNING *`,
-    [threatKey, rule.title, category, topics.join(',') || null, severity, JSON.stringify(matchedRules)]
+    [rule.title, category, topics.join(',') || null, severity, JSON.stringify(matchedRules), threatKey]
   );
   return r && r.rows.length ? r.rows[0] : null;
 }
@@ -489,27 +432,14 @@ async function ingest(log, opts = {}) {
 
 async function resolveStale() {
   if (!ENABLED) return 0;
-  if (!db.isPostgresConnected()) {
-    const now = Date.now();
-    let n = 0;
-    for (const s of memStore()) {
-      if (s.status === 'open' && now - toMs(s.lastEventAt) > RESOLVE_AFTER_MS) {
-        s.status = 'resolved';
-        s.resolvedAt = new Date().toISOString();
-        s.autoResolved = true;
-        emitThreatEvent(s.deviceId, s.deviceName, toIncident(s), 'resolved');
-        n++;
-      }
-    }
-    return n;
-  }
   const r = await db.query(
     `UPDATE threat_incidents
-        SET status = 'resolved', resolved_at = NOW(), auto_resolved = TRUE
+        SET status = 'resolved', resolved_at = datetime('now'), auto_resolved = 1
       WHERE status = 'open'
-        AND last_event_at < NOW() - ($1::numeric * INTERVAL '1 millisecond')
+        AND julianday(last_event_at) < julianday('now', '-' || ? || ' seconds')
       RETURNING *`,
-    [String(RESOLVE_AFTER_MS)]
+    // julianday() tidak menerima modifier 'milliseconds' → konversi ke sekond.
+    [String(Math.max(1, Math.ceil(RESOLVE_AFTER_MS / 1000)))]
   );
   const rows = r ? r.rows : [];
   for (const row of rows) {
@@ -546,7 +476,7 @@ async function backfill({ batchSize = 200, maxBatches = 50 } = {}) {
            LEFT JOIN devices d ON d.id = l.device_id
           WHERE l.category IS NULL
           ORDER BY l.received_at ASC, l.id ASC
-          LIMIT $1`,
+          LIMIT ?`,
         [batchSize]
       );
       const rows = r ? r.rows : [];
@@ -562,8 +492,8 @@ async function backfill({ batchSize = 200, maxBatches = 50 } = {}) {
           topics
         });
         await db.query(
-          `UPDATE device_logs SET topics = $2, category = $3 WHERE id = $1`,
-          [row.id, topics.join(',') || null, category]
+          `UPDATE device_logs SET topics = ?, category = ? WHERE id = ?`,
+          [topics.join(',') || null, category, row.id]
         );
         await ingest({
           id: row.id,
@@ -631,19 +561,20 @@ async function getTimelineForDevice(deviceId, { includeResolved = false, inciden
 
   const incRes = await db.query(
     `SELECT * FROM threat_incidents
-      WHERE device_id = $1 AND ($2::boolean OR status <> 'resolved')
+      WHERE device_id = ? AND (? OR status <> 'resolved')
       ORDER BY (status = 'open') DESC, last_event_at DESC
-      LIMIT $3`,
-    [deviceId, includeResolved, incidentLimit]
+      LIMIT ?`,
+    // better-sqlite3 tidak bind boolean → cast ke 1/0.
+    [deviceId, includeResolved ? 1 : 0, incidentLimit]
   );
   const incidents = (incRes ? incRes.rows : []).map(toIncident);
 
   if (incidents.length > 0) {
     const keys = incidents.map(i => i.threatKey);
     const evRes = await db.query(
-      `SELECT * FROM device_logs WHERE threat_key = ANY($1::text[])
+      `SELECT * FROM device_logs WHERE threat_key IN (${keys.map(() => '?').join(',')})
         ORDER BY received_at ASC, id ASC`,
-      [keys]
+      keys
     );
     const byKey = new Map();
     for (const row of (evRes ? evRes.rows : [])) {
@@ -655,8 +586,8 @@ async function getTimelineForDevice(deviceId, { includeResolved = false, inciden
 
   const looseRes = await db.query(
     `SELECT * FROM device_logs
-      WHERE device_id = $1 AND threat_key IS NULL
-      ORDER BY received_at DESC, id DESC LIMIT $2`,
+      WHERE device_id = ? AND threat_key IS NULL
+      ORDER BY received_at DESC, id DESC LIMIT ?`,
     [deviceId, looseLimit]
   );
   const looseEvents = (looseRes ? looseRes.rows : []).map(toEvent).reverse();
@@ -669,11 +600,11 @@ async function getIncident(threatKey) {
     const row = memStore().find(s => s.threatKey === threatKey);
     return row ? toIncident(row) : null;
   }
-  const r = await db.query('SELECT * FROM threat_incidents WHERE threat_key = $1', [threatKey]);
+  const r = await db.query('SELECT * FROM threat_incidents WHERE threat_key = ?', [threatKey]);
   if (!r || r.rows.length === 0) return null;
   const incident = toIncident(r.rows[0]);
   const evRes = await db.query(
-    `SELECT * FROM device_logs WHERE threat_key = $1 ORDER BY received_at ASC, id ASC`,
+    `SELECT * FROM device_logs WHERE threat_key = ? ORDER BY received_at ASC, id ASC`,
     [threatKey]
   );
   incident.events = (evRes ? evRes.rows : []).map(toEvent);
@@ -694,10 +625,10 @@ async function ack(threatKey, by) {
   }
   const r = await db.query(
     `UPDATE threat_incidents
-        SET status = 'acknowledged', acked_at = NOW(), acked_by = $2
-      WHERE threat_key = $1 AND status = 'open'
+        SET status = 'acknowledged', acked_at = datetime('now'), acked_by = ?
+      WHERE threat_key = ? AND status = 'open'
       RETURNING *`,
-    [threatKey, reviewer]
+    [reviewer, threatKey]
   );
   if (!r || r.rows.length === 0) return null;
   const incident = toIncident(r.rows[0]);
@@ -707,23 +638,22 @@ async function ack(threatKey, by) {
 
 async function status() {
   const out = { enabled: ENABLED, sessionWindowMs: SESSION_WINDOW_MS, resolveAfterMs: RESOLVE_AFTER_MS, backfill: !BACKFILL_ENABLED };
-  if (!db.isPostgresConnected()) {
-    out.mode = 'memory';
-    out.sessions = memStore().length;
-    out.open = memStore().filter(s => s.status === 'open').length;
-    return out;
+  out.mode = 'sqlite';
+  let s = null;
+  try {
+    s = db.query(
+      `SELECT
+         (SELECT count(*) FROM threat_incidents) AS sessions,
+         (SELECT count(*) FROM threat_incidents WHERE status='open') AS open,
+         (SELECT count(*) FROM threat_incidents WHERE status='acknowledged') AS acknowledged,
+         (SELECT count(*) FROM threat_incidents WHERE status='resolved') AS resolved,
+         (SELECT count(*) FROM device_logs WHERE threat_key IS NOT NULL) AS grouped_events,
+         (SELECT count(*) FROM device_logs WHERE threat_key IS NULL) AS loose_events,
+         (SELECT count(*) FROM device_logs WHERE category IS NULL) AS uncategorized`
+    );
+  } catch (e) {
+    s = null;
   }
-  const s = await db.query(
-    `SELECT
-       (SELECT count(*) FROM threat_incidents)::int AS sessions,
-       (SELECT count(*) FROM threat_incidents WHERE status='open')::int AS open,
-       (SELECT count(*) FROM threat_incidents WHERE status='acknowledged')::int AS acknowledged,
-       (SELECT count(*) FROM threat_incidents WHERE status='resolved')::int AS resolved,
-       (SELECT count(*) FROM device_logs WHERE threat_key IS NOT NULL)::int AS grouped_events,
-       (SELECT count(*) FROM device_logs WHERE threat_key IS NULL)::int AS loose_events,
-       (SELECT count(*) FROM device_logs WHERE category IS NULL)::int AS uncategorized`
-  ).catch(() => null);
-  out.mode = 'postgres';
   if (s && s.rows.length) Object.assign(out, s.rows[0]);
   return out;
 }

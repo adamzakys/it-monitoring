@@ -98,10 +98,9 @@ async function computeDailyAvailability(days = 31) {
 /**
  * Sync real InfluxDB availability into daily_uptime (upsert per date).
  * Lazy + cache: call often is cheap; the heavy aggregate runs at most once
- * every SYNC_INTERVAL_MS. Safe no-op when PostgreSQL/InfluxDB unavailable.
+ * every SYNC_INTERVAL_MS.
  */
 async function ensureDailyUptime() {
-  if (!db.isPostgresConnected()) return { ok: false, reason: 'no postgres' };
   const now = Date.now();
   if (now - lastSyncAt < SYNC_INTERVAL_MS && syncPromise) {
     return syncPromise;
@@ -113,11 +112,11 @@ async function ensureDailyUptime() {
       for (const r of rows) {
         await db.query(
           `INSERT INTO daily_uptime (date, total_checks, successful_checks, uptime_percentage)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (date) DO UPDATE SET
-             total_checks = EXCLUDED.total_checks,
-             successful_checks = EXCLUDED.successful_checks,
-             uptime_percentage = EXCLUDED.uptime_percentage`,
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(date) DO UPDATE SET
+             total_checks = excluded.total_checks,
+             successful_checks = excluded.successful_checks,
+             uptime_percentage = excluded.uptime_percentage`,
           [r.date, r.total_checks, r.successful_checks, r.uptime_percentage]
         );
       }

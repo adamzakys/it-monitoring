@@ -48,9 +48,11 @@ function isValidOid(value) {
 /**
  * pg DATE → 'YYYY-MM-DD' tanpa pergeseran zona waktu.
  * (pg mengembalikan DATE sebagai Date tengah malam waktu lokal server;
- *  serialisasi JSON biasa ke ISO UTC menggeser tanggal -/+ 1 hari.)
+ *  serialisasi JSON biasa ke ISO UTC menggeser tanggal -/+ 1 hari.
+ *  SQLite menyimpan date sebagai string 'YYYY-MM-DD' → kembalikan apa adanya.)
  */
 function pgDateToStr(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const dt = value instanceof Date ? value : new Date(value);
   if (isNaN(dt.getTime())) return String(value);
   const y = dt.getFullYear();
@@ -87,10 +89,20 @@ function safeError(err, fallback = 'Internal server error') {
     case 'ECONNREFUSED': return 'Upstream service unavailable.';
     case 'ETIMEDOUT':    return 'Upstream service timed out.';
     case 'ENOTFOUND':    return 'Upstream host not found.';
+    // PostgreSQL legacy codes (kompatibel lama)
     case '23505':        return 'Duplicate record.';
     case '23503':        return 'Referenced record not found.';
     case '23502':        return 'Required field missing.';
     case '22P02':        return 'Invalid input format.';
+    // SQLite codes (better-sqlite3 — database aktual)
+    case 'SQLITE_CONSTRAINT_PRIMARYKEY': return 'Duplicate record.';
+    case 'SQLITE_CONSTRAINT_UNIQUE':     return 'Duplicate record.';
+    case 'SQLITE_CONSTRAINT_FOREIGNKEY': return 'Referenced record not found.';
+    case 'SQLITE_CONSTRAINT_NOTNULL':    return 'Required field missing.';
+    case 'SQLITE_CONSTRAINT_CHECK':      return 'Value violates a check constraint.';
+    case 'SQLITE_BUSY':                  return 'Database is busy. Try again.';
+    case 'SQLITE_READONLY':              return 'Database is read-only.';
+    case 'SQLITE_NOMEM':                 return 'Database ran out of memory.';
     default:             return fallback;
   }
 }
@@ -128,7 +140,7 @@ router.get('/kpi', async (req, res) => {
       try {
         const upRes = await db.query(
           `SELECT date, uptime_percentage FROM daily_uptime
-           WHERE date >= (CURRENT_DATE - INTERVAL '30 days')
+           WHERE date >= date('now', '-30 days')
            ORDER BY date ASC`
         );
         if (upRes.rows.length > 0) {
@@ -181,7 +193,7 @@ router.get('/devices', async (req, res) => {
     let interfaces = [];
 
     if (db.isPostgresConnected()) {
-      const devRes = await db.query('SELECT * FROM devices ORDER BY id ASC');
+      const devRes = await db.query('SELECT * FROM devices ORDER BY sort_order ASC, id ASC');
       devices = devRes.rows;
 
       // Sync interfaces from InfluxDB dynamically for each device (with IP fallback)
@@ -190,15 +202,15 @@ router.get('/devices', async (req, res) => {
         if (actualIfaces.length > 0) {
           // Delete default templates if we have real interfaces now
           await db.query(
-            `DELETE FROM interfaces WHERE device_id = $1 AND (interface_name = 'ether1-WAN' OR interface_name = 'ether2-LAN')`,
+            `DELETE FROM interfaces WHERE device_id = ? AND (interface_name = 'ether1-WAN' OR interface_name = 'ether2-LAN')`,
             [dev.id]
           );
           // Insert actual interfaces
           for (const ifaceName of actualIfaces) {
             await db.query(
               `INSERT INTO interfaces (device_id, interface_name, status, speed_bps)
-               VALUES ($1, $2, 'up', 1000000000)
-               ON CONFLICT (device_id, interface_name) DO NOTHING`,
+               VALUES (?, ?, 'up', 1000000000)
+               ON CONFLICT(device_id, interface_name) DO NOTHING`,
               [dev.id, ifaceName]
             );
           }
@@ -275,34 +287,14 @@ router.post('/devices', async (req, res) => {
     // Immediate real ICMP ping (tidak nunggu Telegraf/InfluxDB)
     const pingResult = await realTimePingForAPI(ip_address);
 
-    if (db.isPostgresConnected()) {
-      const result = await db.query(
-        `INSERT INTO devices (name, ip_address, device_type, snmp_community, snmp_version, snmp_port, polling_interval, status, ping_latency, packet_loss, last_seen)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *`,
-        [name, ip_address, device_type || 'router', snmp_community || 'public', snmp_version || '2c', portVal, intervalVal,
-         pingResult.reachable ? 'online' : 'offline',
-         pingResult.latency_ms, pingResult.packet_loss]
-      );
-      newDevice = result.rows[0];
-    } else {
-      const store = db.getMemoryStore();
-      newDevice = {
-        id: Date.now(),
-        name,
-        ip_address,
-        device_type: device_type || 'router',
-        snmp_community: snmp_community || 'public',
-        snmp_version: snmp_version || '2c',
-        snmp_port: portVal,
-        polling_interval: intervalVal,
-        status: pingResult.reachable ? 'online' : 'offline',
-        ping_latency: pingResult.latency_ms,
-        packet_loss: pingResult.packet_loss,
-        last_seen: new Date().toISOString(),
-        created_at: new Date().toISOString()
-      };
-      store.devices.push(newDevice);
-    }
+    const result = await db.query(
+      `INSERT INTO devices (name, ip_address, device_type, snmp_community, snmp_version, snmp_port, polling_interval, status, ping_latency, packet_loss, last_seen)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')) RETURNING *`,
+      [name, ip_address, device_type || 'router', snmp_community || 'public', snmp_version || '2c', portVal, intervalVal,
+       pingResult.reachable ? 'online' : 'offline',
+       pingResult.latency_ms, pingResult.packet_loss]
+    );
+    newDevice = result.rows[0];
 
     // Auto-generate Telegraf config & reload
     const telegrafSync = telegrafManager.syncDeviceConfig(newDevice);
@@ -370,18 +362,163 @@ router.delete('/devices/:id', async (req, res) => {
   const id = parseInt(req.params.id, 10);
 
   try {
-    if (db.isPostgresConnected()) {
-      await db.query('DELETE FROM devices WHERE id = $1', [id]);
-    } else {
-      const store = db.getMemoryStore();
-      store.devices = store.devices.filter(d => d.id !== id);
-      store.interfaces = store.interfaces.filter(i => i.device_id !== id);
-    }
+    await db.query('DELETE FROM devices WHERE id = ?', [id]);
 
     // Remove Telegraf config & reload
     telegrafManager.removeDeviceConfig(id);
 
     res.json({ success: true, message: `Device ${id} deleted and Telegraf config removed.` });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// ============================================================================
+// Device Order & Presets — urutan tampilan device di Device Inventory
+// ----------------------------------------------------------------------------
+// Kolom `devices.sort_order` dihitung dari order array frontend (drag & drop).
+// Preset disimpan di tabel `app_settings` (key = 'device_order_presets') sebagai
+// JSON array [{ name, order: [deviceId,...], created_at }].
+// ============================================================================
+
+const PRESETS_KEY = 'device_order_presets';
+const MAX_PRESETS = 20;
+
+function sanitizePresetName(name) {
+  const clean = String(name || '').trim().replace(/[^A-Za-z0-9 _\-.]/g, '').slice(0, 40);
+  return clean;
+}
+
+/** Baca preset dari app_settings. Mengembalikan array (bisa kosong). */
+function readPresets() {
+  try {
+    const r = db.query('SELECT value FROM app_settings WHERE key = ?', [PRESETS_KEY]);
+    if (r.rows.length === 0) return [];
+    const parsed = JSON.parse(r.rows[0].value || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    console.warn('[DeviceOrder] readPresets error:', e.message);
+    return [];
+  }
+}
+
+function writePresets(presets) {
+  try {
+    db.query(
+      `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
+      [PRESETS_KEY, JSON.stringify(presets)]
+    );
+  } catch (e) {
+    console.warn('[DeviceOrder] writePresets error:', e.message);
+    throw e;
+  }
+}
+
+// POST /api/device-order — body: { order: [deviceId, ...] } → set sort_order 0..n
+router.post('/device-order', async (req, res) => {
+  const order = (req.body && Array.isArray(req.body.order)) ? req.body.order : null;
+  if (!order) return res.status(400).json({ success: false, error: 'order array required' });
+
+  // Sanitize: uniqui device id integer valid
+  const seen = new Set();
+  const ids = [];
+  for (const raw of order) {
+    const id = parseInt(raw, 10);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  if (ids.length === 0) return res.status(400).json({ success: false, error: 'No valid device ids.' });
+
+  try {
+    db.transaction((d) => {
+      const stmt = d.prepare('UPDATE devices SET sort_order = ? WHERE id = ?');
+      for (let i = 0; i < ids.length; i++) {
+        stmt.run(i + 1, ids[i]);
+      }
+    });
+    res.json({ success: true, message: `Device order updated (${ids.length} devices).` });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// GET /api/device-order/presets — daftar preset urutan yang disimpan
+router.get('/device-order/presets', (req, res) => {
+  const presets = readPresets();
+  res.json({ success: true, presets });
+});
+
+// POST /api/device-order/presets — body: { name, order: [deviceId,...] } → save/replace preset
+router.post('/device-order/presets', (req, res) => {
+  const name = sanitizePresetName(req.body && req.body.name);
+  const order = (req.body && Array.isArray(req.body.order)) ? req.body.order : null;
+  if (!name) return res.status(400).json({ success: false, error: 'Preset name required.' });
+  if (!order) return res.status(400).json({ success: false, error: 'order array required.' });
+
+  const seen = new Set();
+  const cleanOrder = [];
+  for (const raw of order) {
+    const id = parseInt(raw, 10);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    cleanOrder.push(id);
+  }
+  if (cleanOrder.length === 0) return res.status(400).json({ success: false, error: 'No valid device ids.' });
+
+  try {
+    let presets = readPresets();
+    const existing = presets.find(p => p.name.toLowerCase() === name.toLowerCase());
+    if (existing) {
+      existing.order = cleanOrder;
+      existing.updated_at = new Date().toISOString();
+    } else {
+      presets.push({ name, order: cleanOrder, created_at: new Date().toISOString() });
+    }
+    // Limit: buang preset paling lama bila oversize
+    if (presets.length > MAX_PRESETS) {
+      presets = presets.slice(presets.length - MAX_PRESETS);
+    }
+    writePresets(presets);
+    res.json({ success: true, message: `Preset "${name}" saved.`, presets });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// POST /api/device-order/presets/apply — body: { name } → apply preset sebagai urutan aktual
+router.post('/device-order/presets/apply', async (req, res) => {
+  const name = sanitizePresetName(req.body && req.body.name);
+  if (!name) return res.status(400).json({ success: false, error: 'Preset name required.' });
+
+  try {
+    const presets = readPresets();
+    const preset = presets.find(p => p.name.toLowerCase() === name.toLowerCase());
+    if (!preset) return res.status(404).json({ success: false, error: 'Preset not found.' });
+
+    const ids = preset.order;
+    db.transaction((d) => {
+      const stmt = d.prepare('UPDATE devices SET sort_order = ? WHERE id = ?');
+      for (let i = 0; i < ids.length; i++) {
+        stmt.run(i + 1, ids[i]);
+      }
+    });
+    res.json({ success: true, message: `Preset "${preset.name}" applied.`, order: ids });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// DELETE /api/device-order/presets/:name — hapus preset
+router.delete('/device-order/presets/:name', (req, res) => {
+  const name = sanitizePresetName(req.params.name);
+  if (!name) return res.status(400).json({ success: false, error: 'Preset name required.' });
+
+  try {
+    const presets = readPresets().filter(p => p.name.toLowerCase() !== name.toLowerCase());
+    writePresets(presets);
+    res.json({ success: true, message: `Preset "${name}" deleted.`, presets });
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
   }
@@ -412,33 +549,17 @@ router.put('/devices/:id', async (req, res) => {
     const intervalVal = parseInt(polling_interval, 10) || 1;
     const portVal = parseInt(snmp_port, 10) || 161;
 
-    if (db.isPostgresConnected()) {
-      const result = await db.query(
-        `UPDATE devices
-         SET name = $1, ip_address = $2, device_type = $3, snmp_community = $4,
-             snmp_version = $5, snmp_port = $6, polling_interval = $7
-         WHERE id = $8 RETURNING *`,
-        [name, ip_address, device_type || 'router', snmp_community || 'public',
-         snmp_version || '2c', portVal, intervalVal, id]
-      );
-      updatedDevice = result.rows[0];
-      if (!updatedDevice) {
-        return res.status(404).json({ success: false, error: 'Device not found' });
-      }
-    } else {
-      const store = db.getMemoryStore();
-      const dev = store.devices.find(d => d.id === id);
-      if (!dev) {
-        return res.status(404).json({ success: false, error: 'Device not found' });
-      }
-      dev.name = name;
-      dev.ip_address = ip_address;
-      dev.device_type = device_type || dev.device_type || 'router';
-      dev.snmp_community = snmp_community || 'public';
-      dev.snmp_version = snmp_version || '2c';
-      dev.snmp_port = portVal;
-      dev.polling_interval = intervalVal;
-      updatedDevice = dev;
+    const result = await db.query(
+      `UPDATE devices
+       SET name = ?, ip_address = ?, device_type = ?, snmp_community = ?,
+           snmp_version = ?, snmp_port = ?, polling_interval = ?
+       WHERE id = ? RETURNING *`,
+      [name, ip_address, device_type || 'router', snmp_community || 'public',
+       snmp_version || '2c', portVal, intervalVal, id]
+    );
+    updatedDevice = result.rows[0];
+    if (!updatedDevice) {
+      return res.status(404).json({ success: false, error: 'Device not found' });
     }
 
     // Regenerate Telegraf config dengan nilai baru → otomatis reload
@@ -463,12 +584,10 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
   try {
     // 1. Hardware / inventory from PostgreSQL (or memory store)
     let device = null;
-    if (db.isPostgresConnected()) {
-      const r = await db.query('SELECT * FROM devices WHERE id = $1', [id]);
-      device = r.rows[0] || null;
-    }
+    const r = await db.query('SELECT * FROM devices WHERE id = ?', [id]);
+    device = r.rows[0] || null;
     if (!device) {
-      device = db.getMemoryStore().devices.find(d => d.id === id) || null;
+      return res.status(404).json({ success: false, error: 'Device not found' });
     }
     if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
 
@@ -767,12 +886,8 @@ router.get('/devices/:id/syslog-status', async (req, res) => {
   if (!id) return res.status(400).json({ success: false, error: 'Invalid device id' });
 
   try {
-    let device = null;
-    if (db.isPostgresConnected()) {
-      const r = await db.query('SELECT * FROM devices WHERE id = $1', [id]);
-      device = r.rows[0] || null;
-    }
-    if (!device) device = db.getMemoryStore().devices.find(d => d.id === id) || null;
+    const r = await db.query('SELECT * FROM devices WHERE id = ?', [id]);
+    const device = r.rows[0] || null;
     if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
 
     const profiler = require('../services/profiler');
@@ -934,12 +1049,8 @@ router.get('/devices/:id/interfaces-realtime', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!id) return res.status(400).json({ success: false, error: 'id required' });
   try {
-    let device = null;
-    if (db.isPostgresConnected()) {
-      const r = await db.query('SELECT * FROM devices WHERE id = $1', [id]);
-      device = r.rows[0];
-    }
-    if (!device) device = db.getMemoryStore().devices.find(d => d.id === id);
+    const r = await db.query('SELECT * FROM devices WHERE id = ?', [id]);
+    const device = r.rows[0];
     if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
 
     const interfaces = await streamService.getRealTimeInterfaces(device);
@@ -957,13 +1068,8 @@ router.get('/devices/:id/interfaces-realtime', async (req, res) => {
 // 3a. Regenerate ALL Telegraf configs + cleanup orphans (untuk sinkronisasi total)
 router.post('/telegraf/regenerate-all', async (req, res) => {
   try {
-    let devices = [];
-    if (db.isPostgresConnected()) {
-      const r = await db.query('SELECT * FROM devices ORDER BY id ASC');
-      devices = r.rows;
-    } else {
-      devices = db.getMemoryStore().devices;
-    }
+    const r = await db.query('SELECT * FROM devices ORDER BY id ASC');
+    const devices = r.rows;
 
     // Cleanup orphan configs (device_X.conf dimana X tidak ada di DB)
     const activeIds = devices.map(d => d.id);
@@ -1161,13 +1267,8 @@ router.get('/incidents/:id', async (req, res) => {
 // 4. Alerts
 router.get('/alerts', async (req, res) => {
   try {
-    let alerts = [];
-    if (db.isPostgresConnected()) {
-      const alertRes = await db.query('SELECT * FROM alerts ORDER BY created_at DESC LIMIT 50');
-      alerts = alertRes.rows;
-    } else {
-      alerts = db.getMemoryStore().alerts;
-    }
+    const alertRes = await db.query('SELECT * FROM alerts ORDER BY created_at DESC LIMIT 50');
+    const alerts = alertRes.rows;
     res.json({ success: true, alerts });
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
@@ -1178,34 +1279,27 @@ router.get('/alerts', async (req, res) => {
 router.get('/events', async (req, res) => {
   try {
     const { deviceId, severity, eventType, limit = 100, offset = 0 } = req.query;
-    let query = 'SELECT * FROM events WHERE 1=1';
+    const queryParts = ['SELECT * FROM events WHERE 1=1'];
     const params = [];
-    let paramIdx = 1;
 
     if (deviceId) {
-      query += ` AND device_id = $${paramIdx}`;
+      queryParts.push(` AND device_id = ?`);
       params.push(parseInt(deviceId, 10));
-      paramIdx++;
     }
     if (severity && severity !== 'all') {
-      query += ` AND severity = $${paramIdx}`;
+      queryParts.push(` AND severity = ?`);
       params.push(severity);
-      paramIdx++;
     }
     if (eventType && eventType !== 'all') {
-      query += ` AND event_type = $${paramIdx}`;
+      queryParts.push(` AND event_type = ?`);
       params.push(eventType);
-      paramIdx++;
     }
 
-    query += ` ORDER BY timestamp DESC LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`;
+    queryParts.push(` ORDER BY timestamp DESC LIMIT ? OFFSET ?`);
     params.push(parseInt(limit, 10), parseInt(offset, 10));
 
-    let events = [];
-    if (db.isPostgresConnected()) {
-      const eventRes = await db.query(query, params);
-      events = eventRes.rows;
-    }
+    const eventRes = await db.query(queryParts.join(''), params);
+    const events = eventRes.rows;
     res.json({ success: true, events });
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
@@ -1215,18 +1309,10 @@ router.get('/events', async (req, res) => {
 // 4b. Live Feed Snapshot - data live aktual (devices, alerts, ws, throughput aggregate)
 router.get('/live-feed', async (req, res) => {
   try {
-    let devices = [];
-    let alerts = [];
-
-    if (db.isPostgresConnected()) {
-      const devRes = await db.query('SELECT id, name, ip_address, status, ping_latency, packet_loss, last_seen FROM devices ORDER BY id ASC');
-      devices = devRes.rows;
-      const aRes = await db.query('SELECT * FROM alerts ORDER BY created_at DESC LIMIT 10');
-      alerts = aRes.rows;
-    } else {
-      devices = db.getMemoryStore().devices;
-      alerts = db.getMemoryStore().alerts.slice(0, 10);
-    }
+    const devRes = await db.query('SELECT id, name, ip_address, status, ping_latency, packet_loss, last_seen FROM devices ORDER BY id ASC');
+    const devices = devRes.rows;
+    const aRes = await db.query('SELECT * FROM alerts ORDER BY created_at DESC LIMIT 10');
+    const alerts = aRes.rows;
 
     const total = devices.length;
     const online = devices.filter(d => d.status === 'online').length;
@@ -1273,7 +1359,7 @@ router.get('/reports/sla', async (req, res) => {
         const r = await db.query(
           `SELECT date, total_checks, successful_checks, uptime_percentage
            FROM daily_uptime
-           WHERE date >= (CURRENT_DATE - INTERVAL '30 days')
+           WHERE date >= date('now', '-30 days')
            ORDER BY date ASC`
         );
         daily = r.rows.map(row => ({
@@ -1354,6 +1440,40 @@ router.get('/reports/sla', async (req, res) => {
   }
 });
 
+
+
+
+
+// ============================================================================
+// SLA Reset — hapus daily_uptime & re-seed dari InfluxDB (untuk fresh start)
+// ============================================================================
+router.post('/reports/sla/reset', async (req, res) => {
+  try {
+    // Hapus data SLA harian lama
+    await db.query('DELETE FROM daily_uptime');
+
+    // Trigger re-seed dari data InfluxDB real-time (measurement `ping`)
+    let reseeded = { ok: false, days: 0 };
+    try {
+      reseeded = await uptimeService.ensureDailyUptime();
+    } catch (e) {
+      console.warn('[SLA Reset] re-seed failed:', e.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'SLA data reset & re-seeded from InfluxDB.',
+      reseeded
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+
+
+
+
 // 5. Settings Endpoint
 // Phase 1: never return the actual InfluxDB token in the response.
 // The frontend is expected to leave the token field empty to keep the
@@ -1372,7 +1492,7 @@ router.get('/settings', (req, res) => {
   res.json({
     success: true,
     settings: safeSettings,
-    db_status: db.isPostgresConnected() ? 'Connected (PostgreSQL)' : 'In-Memory Resilient Fallback',
+    db_status: 'Connected (SQLite)',
     telegraf_conf_dir: process.env.TELEGRAF_CONF_DIR || './telegraf.d'
   });
 });
@@ -1487,7 +1607,9 @@ router.get('/topology', async (req, res) => {
          FROM device_links
          ORDER BY id ASC`
       );
-      links = r.rows;
+      // SQLite menyimpan BOOLEAN sebagai 0/1; normalisasi agar logika
+      // `stale === true` di bawah (dan render frontend) tetap benar.
+      links = r.rows.map(l => ({ ...l, stale: !!Number(l.stale) }));
     } else {
       const store = db.getMemoryStore();
       links = (store.device_links || []);
@@ -1683,7 +1805,7 @@ router.put('/topology/manual-ip/:linkId', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Format IPv4 tidak valid' });
     }
     if (db.isPostgresConnected()) {
-      await db.query('UPDATE device_links SET manual_ipv4 = $1 WHERE id = $2', [ipAddr, linkId]);
+      await db.query('UPDATE device_links SET manual_ipv4 = ? WHERE id = ?', [ipAddr, linkId]);
     } else {
       const store = db.getMemoryStore();
       const links = store.device_links || [];
@@ -1706,7 +1828,7 @@ router.get('/topology/status', async (req, res) => {
       const r = await db.query(
         `SELECT MAX(last_seen) AS last_seen,
                 COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE stale = false) AS active
+                SUM(CASE WHEN stale = 0 THEN 1 ELSE 0 END) AS active
          FROM device_links`
       );
       if (r.rows[0]) {

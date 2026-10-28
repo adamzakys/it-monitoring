@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "de6eea4fb1c02bef3cf34bedef62c21e1d466c90",
-    "indexed_at": "2026-10-16T07:51:08Z",
+    "commit": "768863905244cdaa3499e38cd12a9d1c9fcb4667",
+    "indexed_at": "2026-10-27T09:12:08Z",
     "project": "home-urzection-Documents-Project-it-monitoring",
-    "nodes": 1510,
-    "edges": 2846,
-    "original_size": 7864320,
-    "compressed_size": 1576544,
+    "nodes": 1526,
+    "edges": 2835,
+    "original_size": 7798784,
+    "compressed_size": 1609282,
     "compression_level": 3
 }

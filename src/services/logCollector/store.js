@@ -134,24 +134,22 @@ async function insertLog(n) {
   }
 
   let pgId = null;
-  if (db.isPostgresConnected()) {
-    try {
-      const r = await db.query(
-        `INSERT INTO device_logs
-           (device_id, source_ip, source_type, transport, facility, severity,
-            program, message, raw_message, correlated_event_type, correlated_at, device_timestamp,
-            topics, category)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-         RETURNING id`,
+  try {
+    const r = await db.query(
+      `INSERT INTO device_logs
+         (device_id, source_ip, source_type, transport, facility, severity,
+          program, message, raw_message, correlated_event_type, correlated_at, device_timestamp,
+          topics, category, received_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       RETURNING id`,
         [rec.deviceId, rec.sourceIp, rec.sourceType, rec.transport, rec.facility,
           rec.severity, rec.program, rec.message, rec.rawMessage,
           rec.correlatedEventType || null, rec.correlatedAt || null, rec.deviceTimestamp,
-          rec.topics, rec.category]
-      );
-      pgId = r.rows[0].id;
-    } catch (e) {
-      console.error('[LogStore] insert failed:', e.message);
-    }
+          rec.topics, rec.category, nowIso]
+    );
+    pgId = r.rows[0].id;
+  } catch (e) {
+    console.error('[LogStore] insert failed:', e.message);
   }
 
   const entry = { id: pgId || (++ringSeq), receivedAt: nowIso, ...rec };
@@ -164,30 +162,27 @@ async function insertLog(n) {
 async function getLogs(deviceId, limit = 200, afterId = 0) {
   const lim = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 500);
   const after = parseInt(afterId, 10) || 0;
-  if (db.isPostgresConnected()) {
-    try {
-      const params = after > 0
-        ? [deviceId, after, lim]
-        : [deviceId, lim];
-      const sql = after > 0
-        ? `SELECT * FROM device_logs WHERE device_id = $1 AND id < $2 ORDER BY id DESC LIMIT $3`
-        : `SELECT * FROM device_logs WHERE device_id = $1 ORDER BY id DESC LIMIT $2`;
-      const r = await db.query(sql, params);
-      return r.rows.map(toPublic);
-    } catch (e) {
-      console.error('[LogStore] getLogs error:', e.message);
-    }
+  try {
+    const params = after > 0
+      ? [deviceId, after, lim]
+      : [deviceId, lim];
+    const sql = after > 0
+      ? `SELECT * FROM device_logs WHERE device_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
+      : `SELECT * FROM device_logs WHERE device_id = ? ORDER BY id DESC LIMIT ?`;
+    const r = await db.query(sql, params);
+    return r.rows.map(toPublic);
+  } catch (e) {
+    console.error('[LogStore] getLogs error:', e.message);
+    return ring
+      .filter(x => x.deviceId === deviceId && (after <= 0 || x.id < after))
+      .slice(0, lim)
+      .map(x => ({ ...x, receivedAt: x.receivedAt || new Date().toISOString() }));
   }
-  return ring
-    .filter(x => x.deviceId === deviceId && (after <= 0 || x.id < after))
-    .slice(0, lim)
-    .map(x => ({ ...x, receivedAt: x.receivedAt || new Date().toISOString() }));
 }
 
 async function cleanup(days = 7) {
-  if (!db.isPostgresConnected()) return 0;
   try {
-    const r = await db.query(`DELETE FROM device_logs WHERE received_at < NOW() - ($1 || ' days')::interval`, [days]);
+    const r = await db.query(`DELETE FROM device_logs WHERE julianday(received_at) < julianday('now', '-' || ? || ' days')`, [days]);
     return r.rowCount || 0;
   } catch (e) {
     console.warn('[LogStore] cleanup error:', e.message);
@@ -197,19 +192,17 @@ async function cleanup(days = 7) {
 
 /** id log terbaru untuk device (cursor verifikasi). 0 bila belum ada. */
 async function getLatestLogId(deviceId) {
-  if (db.isPostgresConnected()) {
-    try {
-      const r = await db.query(
-        'SELECT COALESCE(MAX(id), 0) AS max_id FROM device_logs WHERE device_id = $1',
-        [deviceId]
-      );
-      return parseInt(r.rows[0].max_id, 10) || 0;
-    } catch (e) {
-      console.error('[LogStore] getLatestLogId error:', e.message);
-    }
+  try {
+    const r = await db.query(
+      'SELECT COALESCE(MAX(id), 0) AS max_id FROM device_logs WHERE device_id = ?',
+      [deviceId]
+    );
+    return parseInt(r.rows[0].max_id, 10) || 0;
+  } catch (e) {
+    console.error('[LogStore] getLatestLogId error:', e.message);
+    const ids = ring.filter(x => x.deviceId === deviceId).map(x => Number(x.id) || 0);
+    return ids.length > 0 ? Math.max(...ids) : 0;
   }
-  const ids = ring.filter(x => x.deviceId === deviceId).map(x => Number(x.id) || 0);
-  return ids.length > 0 ? Math.max(...ids) : 0;
 }
 
 /**
@@ -223,19 +216,14 @@ async function watchForNewLog(deviceId, sinceId, timeoutMs = 45000, pollMs = 100
   const deadline = Date.now() + budget;
 
   while (Date.now() < deadline) {
-    if (db.isPostgresConnected()) {
-      try {
-        const r = await db.query(
-          'SELECT * FROM device_logs WHERE device_id = $1 AND id > $2 ORDER BY id DESC LIMIT 1',
-          [deviceId, since]
-        );
-        if (r.rows.length > 0) return toPublic(r.rows[0]);
-      } catch (e) {
-        console.error('[LogStore] watchForNewLog error:', e.message);
-      }
-    } else {
-      const hit = ring.find(x => x.deviceId === deviceId && (Number(x.id) || 0) > since);
-      if (hit) return { ...hit, receivedAt: hit.receivedAt || new Date().toISOString() };
+    try {
+      const r = await db.query(
+        'SELECT * FROM device_logs WHERE device_id = ? AND id > ? ORDER BY id DESC LIMIT 1',
+        [deviceId, since]
+      );
+      if (r.rows.length > 0) return toPublic(r.rows[0]);
+    } catch (e) {
+      console.error('[LogStore] watchForNewLog error:', e.message);
     }
     await new Promise(r => setTimeout(r, pollMs));
   }
@@ -250,20 +238,19 @@ async function watchForNewLog(deviceId, sinceId, timeoutMs = 45000, pollMs = 100
 async function countUnmatchedByIp(ip, sinceMs = 600000) {
   if (!ip) return 0;
   const windowMs = Math.max(0, parseInt(sinceMs, 10) || 0);
-  if (db.isPostgresConnected()) {
-    try {
-      const r = await db.query(
-        `SELECT COUNT(*) AS n FROM device_logs
-          WHERE device_id IS NULL AND source_ip = $1
-            AND received_at >= NOW() - ($2::numeric * INTERVAL '1 millisecond')`,
-        [ip, String(windowMs)]
-      );
-      return parseInt(r.rows[0].n, 10) || 0;
-    } catch (e) {
-      console.error('[LogStore] countUnmatchedByIp error:', e.message);
-    }
+  try {
+    const r = await db.query(
+      `SELECT COUNT(*) AS n FROM device_logs
+        WHERE device_id IS NULL AND source_ip = ?
+          AND julianday(received_at) >= julianday('now', '-' || ? || ' seconds')`,
+      // julianday() tidak menerima modifier 'milliseconds' → konversi ke sekond.
+      [ip, String(Math.max(1, Math.ceil(windowMs / 1000)))]
+    );
+    return parseInt(r.rows[0].n, 10) || 0;
+  } catch (e) {
+    console.error('[LogStore] countUnmatchedByIp error:', e.message);
+    return ring.filter(x => !x.deviceId && x.sourceIp === ip).length;
   }
-  return ring.filter(x => !x.deviceId && x.sourceIp === ip).length;
 }
 
 function status() {

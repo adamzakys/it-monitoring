@@ -177,6 +177,17 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                 Add Device
               </button>
+
+              <!-- Device Order: drag & drop rearrange + preset urutan -->
+              <div class="device-order-controls">
+                <select id="device-order-preset-select" title="Preset urutan device yang disimpan sebelumnya">
+                  <option value="">— Preset Urutan —</option>
+                </select>
+                <button class="btn-secondary" id="btn-apply-preset" title="Apply preset selezionato sebagai urutan aktual">Apply</button>
+                <button class="btn-secondary" id="btn-save-preset" title="Save urutan aktual sebagai preset baru">Save Preset</button>
+                <button class="btn-action" id="btn-save-order" style="display:none;" title="Persist urutan drag-and-drop aktual ke database">&#128190; Save Order</button>
+              </div>
+              <div class="device-order-hint" id="device-order-hint" style="display:none;">Urutan berubah — klik <strong>Save Order</strong> untuk persist</div>
             </div>
           </div>
 

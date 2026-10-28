@@ -21,10 +21,10 @@
   "license": "MIT",
   "dependencies": {
     "@influxdata/influxdb-client": "^1.35.0",
+    "better-sqlite3": "^11.7.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "pg": "^8.13.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {

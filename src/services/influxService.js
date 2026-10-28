@@ -795,13 +795,8 @@ async function getInterfaceThroughputHistory(deviceId, interfaceName, minutes = 
       const streamService = require('./streamService');
       // Need device.ip_address for SNMP walk - fetch from DB
       const db = require('../db');
-      let deviceObj = null;
-      if (db.isPostgresConnected()) {
-        const r = await db.query('SELECT id, ip_address, snmp_community FROM devices WHERE id = $1', [deviceId]);
-        deviceObj = r.rows[0];
-      } else {
-        deviceObj = db.getMemoryStore().devices.find(d => d.id === deviceId);
-      }
+      const r = await db.query('SELECT id, ip_address, snmp_community FROM devices WHERE id = ?', [deviceId]);
+      let deviceObj = r.rows[0];
       if (deviceObj && deviceObj.ip_address) {
         const rtResult = await streamService.getRealTimeInterfaceMbps(deviceObj, interfaceName);
         if (rtResult && (rtResult.inMbps > 0 || rtResult.outMbps > 0 || rtResult.reachable)) {

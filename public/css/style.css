@@ -638,6 +638,86 @@ body {
   gap: 14px;
 }
 
+/* Device Order Controls — drag & drop rearrange + preset urutan */
+.device-order-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.device-order-controls select#device-order-preset-select {
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-family: var(--font-sans);
+  padding: 5px 6px;
+  max-width: 160px;
+}
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--border-highlight);
+  color: var(--text-secondary);
+  padding: 6px 11px;
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  white-space: nowrap;
+  transition: var(--transition-fast);
+}
+
+.btn-secondary:hover {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+  background: rgba(37, 150, 190, 0.08);
+}
+
+.device-order-hint {
+  font-size: 0.7rem;
+  color: var(--color-warning);
+  margin-left: 2px;
+  white-space: nowrap;
+}
+
+/* Number badge urutan di card */
+.device-order-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  min-width: 20px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: 50%;
+  background: rgba(37, 150, 190, 0.12);
+  border: 1px solid var(--border-highlight);
+  color: var(--color-brand);
+  font-size: 0.68rem;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  user-select: none;
+}
+
+/* Feedback drag & drop */
+.device-card[draggable="true"] {
+  cursor: grab;
+}
+
+.device-card.dragging {
+  opacity: 0.45;
+  border: 1.5px dashed var(--color-brand);
+}
+
+.device-card.drop-target {
+  border: 1.5px solid var(--color-brand);
+  box-shadow: 0 0 16px rgba(37, 150, 190, 0.25);
+}
+
 .device-card {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);

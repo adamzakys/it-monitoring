@@ -10,6 +10,10 @@ const state = {
   selectedInterface: '',
   activeFilter: 'all',
   searchQuery: '',
+  // Urutan tampilan device — Device Inventory drag & drop + preset urutan
+  deviceOrderDirty: false,
+  deviceOrderPresets: [],
+  dragState: { id: null, over: null, after: false },
   alerts: [],
   activeIncidents: [],
   incidentHistory: [],
@@ -195,9 +199,12 @@ async function loadInitialData() {
     if (kpiRes.success) updateKpis(kpiRes);
     if (devRes.success) {
       state.devices = devRes.devices;
+      // Urutan tampilan custom (sort_order) + load preset dropdown
+      sortDevices();
       renderDeviceGrid();
       updateDonutChart();
       updateInterfaceDropdown();
+      loadDeviceOrderPresets();
     }
     if (alertRes.success) {
       state.alerts = alertRes.alerts;
@@ -696,6 +703,145 @@ function refreshKpiCounters() {
 /**
  * Renders Node Matrix Grid (Zona 3)
  */
+/**
+ * Sort state.devices oleh sort_order (kolom DB) dengan id sebagai tiebreak.
+ * Deskrip: urutan tampilan custom dari backend, fallback id ASC.
+ */
+function sortDevices() {
+  state.devices.sort((a, b) => {
+    const ao = parseInt(a.sort_order, 10) || 0;
+    const bo = parseInt(b.sort_order, 10) || 0;
+    if (ao !== bo) return ao - bo;
+    return (a.id || 0) - (b.id || 0);
+  });
+}
+
+/** Nomor urut (1-based) di dalam seluruh pool device. */
+function deviceOrderNumber(devId) {
+  return state.devices.findIndex(d => d.id === devId) + 1;
+}
+
+/**
+ * Reorder state.devices saat drag & drop pada card device.
+ * `after` = true → device dragged di-insert setelah target (lekungan mouse).
+ */
+function doReorderDevice(draggedId, targetId, after) {
+  const arr = state.devices;
+  const fromIdx = arr.findIndex(d => d.id === draggedId);
+  if (fromIdx < 0) return;
+  const dev = arr.splice(fromIdx, 1)[0];
+  let insIdx = arr.findIndex(d => d.id === targetId);
+  if (insIdx < 0) insIdx = arr.length - 1;
+  if (after) insIdx += 1;
+  insIdx = Math.max(0, Math.min(insIdx, arr.length));
+  arr.splice(insIdx, 0, dev);
+  state.deviceOrderDirty = true;
+  const hint = document.getElementById('device-order-hint');
+  const saveBtn = document.getElementById('btn-save-order');
+  if (hint) hint.style.display = 'block';
+  if (saveBtn) saveBtn.style.display = '';
+}
+
+/** POST urutan aktual (state.devices) ke backend → persist sort_order. */
+async function saveDeviceOrder() {
+  const order = state.devices.map(d => d.id);
+  const hint = document.getElementById('device-order-hint');
+  try {
+    const res = await fetch('/api/device-order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order })
+    }).then(r => r.json());
+    if (res.success) {
+      state.deviceOrderDirty = false;
+      const saveBtn = document.getElementById('btn-save-order');
+      if (saveBtn) saveBtn.style.display = 'none';
+      if (hint) { hint.textContent = '✓ Urutan disimpan (' + order.length + ' device).'; hint.style.color = 'var(--color-online)'; setTimeout(() => { hint.style.display = 'none'; hint.style.color = ''; }, 4000); }
+      return true;
+    }
+    if (hint) { hint.textContent = 'Failed: ' + (res.error || 'unknown'); hint.style.display = 'block'; }
+    return false;
+  } catch (e) {
+    if (hint) { hint.textContent = 'Save order error: ' + e.message; hint.style.display = 'block'; }
+    return false;
+  }
+}
+
+/** GET preset urutan dari backend → populate dropdown. */
+async function loadDeviceOrderPresets() {
+  try {
+    const res = await fetch('/api/device-order/presets').then(r => r.json());
+    state.deviceOrderPresets = (res && Array.isArray(res.presets)) ? res.presets : [];
+    populatePresetDropdown();
+  } catch (e) {
+    state.deviceOrderPresets = [];
+  }
+}
+
+function populatePresetDropdown() {
+  const sel = document.getElementById('device-order-preset-select');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '<option value="">— Preset Urutan —</option>' +
+    state.deviceOrderPresets.map(p =>
+      '<option value="' + escapeHtml(p.name) + '">' + escapeHtml(p.name) + '</option>'
+    ).join('');
+  if (current) sel.value = current;
+}
+
+/** Apply preset selezionato di dropdown → POST apply → re-fetch devices. */
+async function applySelectedPreset() {
+  const sel = document.getElementById('device-order-preset-select');
+  if (!sel || !sel.value) { alert('Seleziona preset urutan dulu.'); return; }
+  const res = await fetch('/api/device-order/presets/apply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: sel.value })
+  }).then(r => r.json());
+  if (res.success) {
+    state.devices.forEach(d => d.sort_order = 0);
+    res.order.forEach((id, i) => {
+      const dev = state.devices.find(d => d.id === id);
+      if (dev) dev.sort_order = i + 1;
+    });
+    sortDevices();
+    state.deviceOrderDirty = false;
+    const hint = document.getElementById('device-order-hint');
+    if (hint) { hint.textContent = '✓ Preset "' + sel.value + '" applied.'; hint.style.color = 'var(--color-online)'; hint.style.display = 'block'; setTimeout(() => { hint.style.display = 'none'; hint.style.color = ''; }, 4000); }
+    renderDeviceGrid();
+  } else {
+    alert('Apply preset failed: ' + (res.error || 'unknown'));
+  }
+}
+
+/** Save urutan aktual sebagai preset (prompt nama). */
+async function saveDevicePreset() {
+  let name = null;
+  if (typeof window.prompt === 'function') {
+    name = window.prompt('Nama preset urutan:', '');
+    if (name === null) return; // user cancel
+  } else {
+    // Fallback browser lama: nama auto dengan timestamp.
+    name = 'Preset ' + new Date().toLocaleString('id-ID', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  }
+  const clean = String(name).trim().slice(0, 40);
+  if (!clean) { alert('Nama preset tidak boleh kosong.'); return; }
+  const order = state.devices.map(d => d.id);
+  const res = await fetch('/api/device-order/presets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: clean, order })
+  }).then(r => r.json());
+  if (res.success) {
+    state.deviceOrderPresets = res.presets;
+    populatePresetDropdown();
+    const hint = document.getElementById('device-order-hint');
+    if (hint) { hint.textContent = '✓ Preset "' + clean + '" saved.'; hint.style.color = 'var(--color-online)'; hint.style.display = 'block'; setTimeout(() => { hint.style.display = 'none'; hint.style.color = ''; }, 4000); }
+  } else {
+    alert('Save preset failed: ' + (res.error || 'unknown'));
+  }
+}
+
 function renderDeviceGrid() {
   const container = document.getElementById('device-cards-grid');
   if (!container) return;
@@ -717,6 +863,8 @@ function renderDeviceGrid() {
 
     card.className = 'device-card ' + (isSelected ? 'selected ' : '') + faultClass;
     card.id = 'dev-card-' + dev.id;
+    card.setAttribute('data-device-id', String(dev.id));
+    card.draggable = true; // enable drag & drop reorder
 
     let lossColor = 'inherit';
     const lossVal = parseFloat(dev.packet_loss);
@@ -732,9 +880,11 @@ function renderDeviceGrid() {
     const dotClass = 'status-dot ' + (dev.status || 'unknown');
     const statusText = (dev.status || 'unknown');
     const typeLabel = deviceTypeLabel(dev.device_type);
+    const orderNo = deviceOrderNumber(dev.id);
 
     card.innerHTML =
       '<div class="card-top">' +
+        '<span class="device-order-badge" title="Urutan #' + orderNo + ' — drag ke lokasi lain untuk mengurutkan">' + orderNo + '</span>' +
         '<div class="status-dot-wrap"><span class="' + dotClass + '"></span><span class="status-text ' + statusText + '">' + statusText + '</span></div>' +
         '<a href="#" class="card-detail-link card-detail-top" data-device-id="' + dev.id + '">View details &rarr;</a>' +
       '</div>' +
@@ -761,6 +911,43 @@ function renderDeviceGrid() {
         openDeviceDetail(dev.id);
       });
     }
+
+    // Drag & drop reorder (Device Inventory)
+    card.addEventListener('dragstart', function (e) {
+      state.dragState.id = dev.id;
+      state.dragState.over = null;
+      state.dragState.after = false;
+      this.classList.add('dragging');
+      try { if (e.dataTransfer) { e.dataTransfer.setData('text/plain', String(dev.id)); e.dataTransfer.effectAllowed = 'move'; } } catch (err) { /* ignore */ }
+    });
+    card.addEventListener('dragover', function (e) {
+      if (!state.dragState.id || state.dragState.id === dev.id) return;
+      e.preventDefault();
+      try { if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; } catch (err) { /* ignore */ }
+      const rect = this.getBoundingClientRect();
+      state.dragState.over = dev.id;
+      state.dragState.after = (e.clientY - rect.top) > (rect.height / 2);
+      document.querySelectorAll('.device-card.drop-target').forEach(c => c.classList.remove('drop-target'));
+      this.classList.add('drop-target');
+    });
+    card.addEventListener('dragleave', function () {
+      this.classList.remove('drop-target');
+    });
+    card.addEventListener('drop', function (e) {
+      if (e.preventDefault) e.preventDefault();
+      this.classList.remove('drop-target');
+      const draggedId = state.dragState.id;
+      state.dragState.id = null;
+      if (draggedId && draggedId !== dev.id) {
+        doReorderDevice(draggedId, dev.id, state.dragState.after);
+        renderDeviceGrid();
+      }
+    });
+    card.addEventListener('dragend', function () {
+      document.querySelectorAll('.device-card').forEach(c => c.classList.remove('dragging', 'drop-target'));
+      state.dragState.id = null;
+      state.dragState.over = null;
+    });
 
     container.appendChild(card);
   });
@@ -2880,6 +3067,14 @@ function setupEventListeners() {
     renderDeviceGrid();
   });
 
+  // Device Order Controls: save urutan drag-drop + preset
+  const btnSaveOrder = document.getElementById('btn-save-order');
+  if (btnSaveOrder) btnSaveOrder.addEventListener('click', saveDeviceOrder);
+  const btnApplyPreset = document.getElementById('btn-apply-preset');
+  if (btnApplyPreset) btnApplyPreset.addEventListener('click', applySelectedPreset);
+  const btnSavePreset = document.getElementById('btn-save-preset');
+  if (btnSavePreset) btnSavePreset.addEventListener('click', saveDevicePreset);
+
   // Status Filter Pills
   document.querySelectorAll('.btn-filter').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -3078,6 +3273,7 @@ function setupEventListeners() {
         if (newDev.packet_loss === undefined) newDev.packet_loss = null;
         if (!newDev.interfaces) newDev.interfaces = [];
         state.devices.push(newDev);
+        sortDevices();
         renderDeviceGrid();
         updateDonutChart();
         refreshKpiCounters();
@@ -3644,7 +3840,7 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
           
           const dbBadge = document.getElementById('cfg-db-status-badge');
           if (dbBadge) {
-            dbBadge.textContent = res.db_status || 'PostgreSQL Active';
+            dbBadge.textContent = res.db_status || 'SQLite Active';
           }
         }
       })

@@ -80,34 +80,30 @@ async function emitEvent(deviceId, deviceName, eventType, value = null, source =
     eventInMemory.pop();
   }
 
-  if (db.isPostgresConnected()) {
-    try {
-      await db.query(
-        `INSERT INTO events (device_id, device_name, event_type, severity, value, source, timestamp)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [deviceId, deviceName, eventType, event.severity, value, source, event.timestamp]
-      );
-    } catch (err) {
-      console.error('[EventLogger] Failed to persist event:', err.message);
-    }
+  try {
+    await db.query(
+      `INSERT INTO events (device_id, device_name, event_type, severity, value, source, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [deviceId, deviceName, eventType, event.severity, value, source, event.timestamp]
+    );
+  } catch (err) {
+    console.error('[EventLogger] Failed to persist event:', err.message);
   }
 
   return event;
 }
 
 async function getEvents(limit = 100) {
-  if (db.isPostgresConnected()) {
-    try {
-      const res = await db.query(
-        `SELECT * FROM events ORDER BY timestamp DESC LIMIT $1`,
-        [limit]
-      );
-      return res.rows;
-    } catch (err) {
-      console.error('[EventLogger] Failed to fetch events:', err.message);
-    }
+  try {
+    const res = await db.query(
+      `SELECT * FROM events ORDER BY timestamp DESC LIMIT ?`,
+      [limit]
+    );
+    return res.rows;
+  } catch (err) {
+    console.error('[EventLogger] Failed to fetch events:', err.message);
+    return eventInMemory.slice(0, limit);
   }
-  return eventInMemory.slice(0, limit);
 }
 
 function clearStateForDevice(deviceId) {

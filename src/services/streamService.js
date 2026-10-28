@@ -653,21 +653,13 @@ async function evaluateDeviceHealth(device, metric) {
 }
 
 async function updateDeviceStatusInDb(deviceId, status, latency, packetLoss) {
-  if (db.isPostgresConnected()) {
-    try {
-      await db.query(
-        `UPDATE devices SET status = $1, ping_latency = $2, packet_loss = $3, last_seen = NOW() WHERE id = $4`,
-        [status, latency, packetLoss, deviceId]
-      );
-    } catch (e) {
-      console.error('[DB Status Update Error]', e.message);
-    }
-  }
-  const memDev = db.getMemoryStore().devices.find(d => d.id === deviceId);
-  if (memDev) {
-    memDev.status = status;
-    memDev.ping_latency = latency;
-    memDev.packet_loss = packetLoss;
+  try {
+    await db.query(
+      `UPDATE devices SET status = ?, ping_latency = ?, packet_loss = ?, last_seen = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      [status, latency, packetLoss, deviceId]
+    );
+  } catch (e) {
+    console.error('[DB Status Update Error]', e.message);
   }
 }
 
@@ -676,34 +668,33 @@ async function updateDeviceStatusInDb(deviceId, status, latency, packetLoss) {
  * Dipanggil setiap tick agar data di DB selalu fresh (tidak stale).
  */
 async function updateDeviceMetricsInDb(deviceId, latency, packetLoss) {
-  if (db.isPostgresConnected()) {
-    try {
-      await db.query(
-        `UPDATE devices SET ping_latency = $1, packet_loss = $2, last_seen = NOW() WHERE id = $3`,
-        [latency, packetLoss, deviceId]
-      );
-    } catch (e) {
-      // silent - jangan spam log tiap detik
-    }
-  }
-  const memDev = db.getMemoryStore().devices.find(d => d.id === deviceId);
-  if (memDev) {
-    memDev.ping_latency = latency;
-    memDev.packet_loss = packetLoss;
+  try {
+    await db.query(
+      `UPDATE devices SET ping_latency = ?, packet_loss = ?, last_seen = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      [latency, packetLoss, deviceId]
+    );
+  } catch (e) {
+    // silent - jangan spam log tiap detik
   }
 }
 
 async function triggerAlert(alertData) {
-  // Dedup: skip kalau alert dengan type+device+status active sudah ada dalam 5 menit terakhir
-  // (menghindari spam alert saat flapping device)
-  const recent = db.getMemoryStore().alerts.find(a =>
-    a.device_id === alertData.deviceId &&
-    a.type === alertData.type &&
-    a.status === 'active' &&
-    (Date.now() - new Date(a.created_at).getTime()) < 5 * 60 * 1000
-  );
-  if (recent) {
-    return; // skip duplicate
+  // Dedup: skip kalau alert dengan type+device+status active sudah ada dalam 5
+  // menit terakhir (menghindari spam alert saat flapping device). Dedup kini
+  // di-query dari SQLite langsung (menggantikan memory store).
+  try {
+    const recent = await db.query(
+      `SELECT id FROM alerts
+       WHERE device_id = ? AND type = ? AND status = 'active'
+         AND julianday(created_at) >= julianday('now', '-5 minutes')
+       LIMIT 1`,
+      [alertData.deviceId, alertData.type]
+    );
+    if (recent.rows.length > 0) {
+      return; // skip duplicate
+    }
+  } catch (e) {
+    // Dedup gagal → tetap lanjut insert (jangan kehilangan alert nyata).
   }
 
   const alert = {
@@ -717,23 +708,17 @@ async function triggerAlert(alertData) {
     created_at: new Date().toISOString()
   };
 
-  // 1. Insert into PostgreSQL (dengan menyertakan device_id)
-  if (db.isPostgresConnected()) {
-    try {
-      await db.query(
-        `INSERT INTO alerts (device_id, type, title, target, severity, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [alert.device_id, alert.type, alert.title, alert.target, alert.severity, alert.status, alert.created_at]
-      );
-    } catch (err) {
-      console.error('[StreamService DB Alert Insert Error]', err.message);
-    }
+  try {
+    await db.query(
+      `INSERT INTO alerts (device_id, type, title, target, severity, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [alert.device_id, alert.type, alert.title, alert.target, alert.severity, alert.status, alert.created_at]
+    );
+  } catch (err) {
+    console.error('[StreamService DB Alert Insert Error]', err.message);
   }
 
-  // 2. Insert into memory store
-  db.getMemoryStore().alerts.unshift(alert);
-
-  // 3. Broadcast via WebSocket
+  // Broadcast via WebSocket
   broadcastNewAlert(alert);
 }
 

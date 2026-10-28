@@ -38,19 +38,14 @@ app.get('*', (req, res, next) => {
 
 // Start Server & Services
 async function bootstrap() {
-  // 1. Initialize DB (PostgreSQL or fallback)
+  // 1. Initialize DB (SQLite)
   await db.initDB();
 
   // 1b. Cleanup orphan telegraf configs (config lama yang device-nya sudah dihapus)
   // agar Telegraf agent tidak stuck baca config outdated
   try {
-    let activeDeviceIds = [];
-    if (db.isPostgresConnected()) {
-      const r = await db.query('SELECT id FROM devices');
-      activeDeviceIds = r.rows.map(row => row.id);
-    } else {
-      activeDeviceIds = db.getMemoryStore().devices.map(d => d.id);
-    }
+    const r = await db.query('SELECT id FROM devices');
+    const activeDeviceIds = r.rows.map(row => row.id);
     const removed = telegrafManager.cleanupOrphanConfigs(activeDeviceIds);
     if (removed > 0) {
       console.log(`[Bootstrap] Cleaned up ${removed} orphan Telegraf config(s).`);
@@ -112,7 +107,7 @@ async function bootstrap() {
   🚀 ITNETMON Dynamic Engine is ONLINE
   🌐 Dashboard UI : http://localhost:${PORT}
   📡 WebSocket WS  : ws://localhost:${PORT}/ws/metrics
-  📊 Database      : ${db.isPostgresConnected() ? 'PostgreSQL (Active)' : 'Resilient Memory Mode'}
+  📊 Database      : SQLite (Active)
 =========================================================
     `);
   });
@@ -120,4 +115,14 @@ async function bootstrap() {
 
 bootstrap().catch(err => {
   console.error('[FATAL SERVER ERROR]', err);
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  db.close();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  db.close();
+  process.exit(0);
 });
