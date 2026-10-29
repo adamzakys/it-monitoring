@@ -17,3 +17,12 @@ tmp/
 *.pid
 
 .DS_Store
+
+# Runtime state — berubah tiap detik saat server jalan, tidak pantas di-commit
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.rdb
+
+# Auto-generated index cache (regenerate otomatis oleh tooling)
+.codebase-memory/
