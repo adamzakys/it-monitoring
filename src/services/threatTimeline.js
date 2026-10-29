@@ -117,6 +117,23 @@ function toEvent(row) {
   };
 }
 
+/**
+ * SQLite menyimpan kolom JSON (matched_rules, evidence) sebagai TEXT.
+ * Nilainya kembali sebagai STRING (mis. "[\"device-reboot\"]"), bukan
+ * array/objek — tanpa parse, frontend crash: `.map is not a function`.
+ */
+function parseJsonField(v, fallback) {
+  if (v == null) return fallback;
+  if (typeof v === 'object') return v;
+  if (typeof v !== 'string') return fallback;
+  try {
+    const p = JSON.parse(v);
+    return (p == null) ? fallback : p;
+  } catch {
+    return fallback;
+  }
+}
+
 function toIncident(row) {
   return {
     threatKey: row.threat_key,
@@ -127,7 +144,7 @@ function toIncident(row) {
     status: row.status,
     category: row.category || null,
     topics: row.topics || null,
-    matchedRules: row.matchedRules || row.matched_rules || [],
+    matchedRules: parseJsonField(row.matchedRules ?? row.matched_rules, []),
     startedAt: row.startedAt || row.started_at,
     lastEventAt: row.lastEventAt || row.last_event_at,
     eventCount: Number(row.eventCount ?? row.event_count ?? 0),
@@ -137,7 +154,7 @@ function toIncident(row) {
     ackedBy: row.ackedBy || row.acked_by || null,
     resolvedAt: row.resolvedAt || row.resolved_at || null,
     autoResolved: row.autoResolved ?? row.auto_resolved ?? false,
-    evidence: row.evidence || {},
+    evidence: parseJsonField(row.evidence, {}),
     events: []
   };
 }
@@ -165,27 +182,27 @@ async function createSession(deviceId, deviceName, atMs, rule, category, topics)
   const threatKey = newThreatKey(deviceId);
   const iso = new Date(atMs).toISOString();
 
-  const r = await db.query(
+  await db.query(
     `INSERT INTO threat_incidents
        (threat_key, device_id, device_name, title, severity, status, category, topics,
         matched_rules, started_at, last_event_at, event_count)
-     VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 0)
-     RETURNING *`,
+     VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 0)`,
     [threatKey, deviceId, deviceName, rule.title, ruleIncidentSeverity(rule.severity),
       category, topics.join(',') || null, JSON.stringify([rule.id]), iso, iso]
   );
-  return r.rows[0];
+  const sessionRes = await db.query('SELECT * FROM threat_incidents WHERE threat_key = ?', [threatKey]);
+  return sessionRes.rows[0];
 }
 
 async function closeSession(threatKey, auto = true) {
   const r = await db.query(
     `UPDATE threat_incidents
         SET status = 'resolved', resolved_at = datetime('now'), auto_resolved = ?
-      WHERE threat_key = ? AND status = 'open'
-      RETURNING *`,
+      WHERE threat_key = ? AND status = 'open'`,
     [auto ? 1 : 0, threatKey]
   );
-  return r && r.rows.length ? r.rows[0] : null;
+  const sessionRes = await db.query('SELECT * FROM threat_incidents WHERE threat_key = ?', [threatKey]);
+  return sessionRes && sessionRes.rows.length ? sessionRes.rows[0] : null;
 }
 
 /**
@@ -193,19 +210,16 @@ async function closeSession(threatKey, auto = true) {
  * karena insert-nya sudah selesai sebelum ingest dipanggil).
  */
 async function fetchWindowRows(deviceId, fromMs, toMsValue, limit = MAX_WINDOW_ROWS) {
-  // julianday(): robusta terhadap duet format timestamp (ISO '...T...Z' dari
-  // store.insertLog dan spasi 'YYYY-MM-DD HH:MM:SS' dari DEFAULT CURRENT_TIMESTAMP).
+  // strftime('%s', ...): epoch seconds comparison, works with ISO timestamps.
   const r = await db.query(
     `SELECT id, message, severity, program, facility, topics, category,
             raw_message, threat_key, received_at
        FROM device_logs
-      WHERE device_id = ? AND julianday(received_at) >= julianday(?) AND julianday(received_at) <= julianday(?)
+      WHERE device_id = ? 
+        AND strftime('%s', received_at) >= strftime('%s', ?)
+        AND strftime('%s', received_at) <= strftime('%s', ?)
       ORDER BY received_at ASC, id ASC
       LIMIT ?`,
-    // Batas atas +1 ms: `received_at` bertimestamp mikrodetik, sedangkan
-    // Date di JavaScript hanya milidetik. Tanpa toleransi ini, baris yang
-    // sedang diproses akan terpotong dari jendelanya sendiri sehingga sesi
-    // beranggota tunggal berakhir dengan event_count = 0.
     [deviceId, new Date(fromMs).toISOString(), new Date(toMsValue + 1).toISOString(), limit]
   );
   return r ? r.rows : [];
@@ -237,7 +251,7 @@ async function attachRows(threatKey, ids) {
  */
 async function refreshAggregates(threatKey) {
   // SQLite UPDATE…FROM memakai penamaan `AS alias` (PG gaya `UPDATE t` tidak valid).
-  const r = await db.query(
+  await db.query(
     `UPDATE threat_incidents AS t
         SET event_count  = agg.n,
             first_log_id = agg.first_id,
@@ -248,23 +262,23 @@ async function refreshAggregates(threatKey) {
                 max(received_at) AS last_at
            FROM device_logs WHERE threat_key = ?
        ) agg
-      WHERE t.threat_key = ?
-      RETURNING *`,
+      WHERE t.threat_key = ?`,
     [threatKey, threatKey]
   );
-  return r && r.rows.length ? r.rows[0] : null;
+  const sessionRes = await db.query('SELECT * FROM threat_incidents WHERE threat_key = ?', [threatKey]);
+  return sessionRes && sessionRes.rows.length ? sessionRes.rows[0] : null;
 }
 
 async function updateSession(threatKey, { rule, category, topics, severity, matchedRules, eventMs }) {
-  const r = await db.query(
+  await db.query(
     `UPDATE threat_incidents
         SET title = ?, category = ?, topics = ?, severity = ?,
             matched_rules = ?
-      WHERE threat_key = ?
-      RETURNING *`,
+      WHERE threat_key = ?`,
     [rule.title, category, topics.join(',') || null, severity, JSON.stringify(matchedRules), threatKey]
   );
-  return r && r.rows.length ? r.rows[0] : null;
+  const sessionRes = await db.query('SELECT * FROM threat_incidents WHERE threat_key = ?', [threatKey]);
+  return sessionRes && sessionRes.rows.length ? sessionRes.rows[0] : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -432,16 +446,15 @@ async function ingest(log, opts = {}) {
 
 async function resolveStale() {
   if (!ENABLED) return 0;
-  const r = await db.query(
+  await db.query(
     `UPDATE threat_incidents
         SET status = 'resolved', resolved_at = datetime('now'), auto_resolved = 1
       WHERE status = 'open'
-        AND julianday(last_event_at) < julianday('now', '-' || ? || ' seconds')
-      RETURNING *`,
-    // julianday() tidak menerima modifier 'milliseconds' → konversi ke sekond.
+        AND strftime('%s', last_event_at) < strftime('%s', 'now', '-' || ? || ' seconds')`,
     [String(Math.max(1, Math.ceil(RESOLVE_AFTER_MS / 1000)))]
   );
-  const rows = r ? r.rows : [];
+  const rowsRes = await db.query('SELECT * FROM threat_incidents WHERE status = "resolved" AND auto_resolved = 1 AND resolved_at >= datetime("now", "-1 minute")');
+  const rows = rowsRes ? rowsRes.rows : [];
   for (const row of rows) {
     emitThreatEvent(row.device_id, row.device_name, toIncident(row), 'resolved');
     try {
@@ -460,13 +473,34 @@ async function resolveStale() {
  * Baris lama belum punya topics/category (kolom baru). Backfill menurunkannya
  * dari raw_message TANPA mengubah isi raw_message, lalu menjalankan ingest
  * secara kronologis sehingga sesi terbentuk dari data historis nyata.
+ * 
+ * Resume capability: tracks last processed log ID in app_settings.
+ * Can process unlimited rows by running multiple times.
  */
-async function backfill({ batchSize = 200, maxBatches = 50 } = {}) {
+async function backfill({ batchSize = 200, maxBatches = 50, resume = true } = {}) {
   if (!ENABLED || !BACKFILL_ENABLED || backfillRunning) return { processed: 0, skipped: true };
-  if (!db.isPostgresConnected()) return { processed: 0, skipped: 'no-postgres' };
+  // Catatan: query berikutnya bekerja untuk PostgreSQL maupun SQLite (keduanya
+  // lewat db.query). Guard lama `!isPostgresConnected()` selalu true di mode
+  // SQLite → backfill pernah diam-diam di-skip.
   backfillRunning = true;
   let processed = 0;
+  
+  const BACKFILL_CURSOR_KEY = 'threat_backfill_cursor';
+  
   try {
+    // Get resume cursor if enabled
+    let cursorId = 0;
+    if (resume) {
+      try {
+        const cursorRes = await db.query('SELECT value FROM app_settings WHERE key = ?', [BACKFILL_CURSOR_KEY]);
+        if (cursorRes.rows.length > 0 && cursorRes.rows[0].value) {
+          cursorId = parseInt(cursorRes.rows[0].value, 10) || 0;
+        }
+      } catch (e) {
+        // No cursor yet, start from beginning
+      }
+    }
+    
     for (let b = 0; b < maxBatches; b++) {
       const r = await db.query(
         `SELECT l.id, l.device_id, d.name AS device_name, l.message, l.severity,
@@ -474,10 +508,10 @@ async function backfill({ batchSize = 200, maxBatches = 50 } = {}) {
                 l.device_timestamp, l.source_ip, l.source_type, l.transport
            FROM device_logs l
            LEFT JOIN devices d ON d.id = l.device_id
-          WHERE l.category IS NULL
+          WHERE l.category IS NULL AND l.id > ?
           ORDER BY l.received_at ASC, l.id ASC
           LIMIT ?`,
-        [batchSize]
+        [cursorId, batchSize]
       );
       const rows = r ? r.rows : [];
       if (rows.length === 0) break;
@@ -513,7 +547,20 @@ async function backfill({ batchSize = 200, maxBatches = 50 } = {}) {
           rawMessage: row.raw_message
         }, { silent: true });
         processed++;
+        cursorId = row.id; // Update cursor to last processed ID
       }
+      
+      // Save cursor after each batch
+      try {
+        await db.query(
+          `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
+          [BACKFILL_CURSOR_KEY, String(cursorId)]
+        );
+      } catch (e) {
+        console.warn('[ThreatTimeline] Failed to save backfill cursor:', e.message);
+      }
+      
       if (rows.length < batchSize) break;
     }
   } catch (e) {
@@ -530,35 +577,10 @@ async function backfill({ batchSize = 200, maxBatches = 50 } = {}) {
 // ---------------------------------------------------------------------------
 
 async function getTimelineForDevice(deviceId, { includeResolved = false, incidentLimit = 20, looseLimit = 50 } = {}) {
-  if (!db.isPostgresConnected()) {
-    const sessions = memStore()
-      .filter(s => s.deviceId === deviceId && (includeResolved || s.status !== 'resolved'))
-      .sort((a, b) => toMs(b.lastEventAt) - toMs(a.lastEventAt))
-      .slice(0, incidentLimit);
-    const store = require('./logCollector/store');
-    const logs = await store.getLogs(deviceId, 500, 0);
-    const incidents = sessions.map(s => {
-      const inc = toIncident(s);
-      inc.events = (logs || []).filter(l => (l.threatKey || l.threat_key) === inc.threatKey).map(r => toEvent({
-        id: r.id, threat_key: inc.threatKey, received_at: r.receivedAt, device_timestamp: r.deviceTimestamp,
-        severity: r.severity, source_type: r.sourceType, source_ip: r.sourceIp, transport: r.transport,
-        facility: r.facility, program: r.program, category: r.category, topics: r.topics,
-        message: r.message, raw_message: r.rawMessage, correlated_event_type: r.correlatedEventType
-      }));
-      return inc;
-    });
-    const looseEvents = (logs || [])
-      .filter(l => !(l.threatKey || l.threat_key))
-      .map(r => toEvent({
-        id: r.id, threat_key: null, received_at: r.receivedAt, device_timestamp: r.deviceTimestamp,
-        severity: r.severity, source_type: r.sourceType, source_ip: r.sourceIp, transport: r.transport,
-        facility: r.facility, program: r.program, category: r.category, topics: r.topics,
-        message: r.message, raw_message: r.rawMessage, correlated_event_type: r.correlatedEventType
-      }))
-      .slice(0, looseLimit);
-    return { incidents, looseEvents, source: 'memory' };
-  }
-
+  // SQLite & Postgres sama-sama lewat db.query. Predikat lama
+  // `!isPostgresConnected()` selalu true di mode SQLite dan memaksa jalur
+  // memStore() yang KOSONG → timeline tak pernah menampilkan incident DB.
+  try {
   const incRes = await db.query(
     `SELECT * FROM threat_incidents
       WHERE device_id = ? AND (? OR status <> 'resolved')
@@ -593,27 +615,74 @@ async function getTimelineForDevice(deviceId, { includeResolved = false, inciden
   const looseEvents = (looseRes ? looseRes.rows : []).map(toEvent).reverse();
 
   return { incidents, looseEvents, source: 'device_logs' };
+  } catch (e) {
+    // Fallback legacy: hanya dipakai bila DB benar-benar tak terpasang.
+    console.warn('[ThreatTimeline] getTimelineForDevice DB error, fallback memory:', e.message);
+    const sessions = memStore()
+      .filter(s => s.deviceId === deviceId && (includeResolved || s.status !== 'resolved'))
+      .sort((a, b) => toMs(b.lastEventAt) - toMs(a.lastEventAt))
+      .slice(0, incidentLimit);
+    const store = require('./logCollector/store');
+    const logs = await store.getLogs(deviceId, 500, 0);
+    const incidents = sessions.map(s => {
+      const inc = toIncident(s);
+      inc.events = (logs || []).filter(l => (l.threatKey || l.threat_key) === inc.threatKey).map(r => toEvent({
+        id: r.id, threat_key: inc.threatKey, received_at: r.receivedAt, device_timestamp: r.deviceTimestamp,
+        severity: r.severity, source_type: r.sourceType, source_ip: r.sourceIp, transport: r.transport,
+        facility: r.facility, program: r.program, category: r.category, topics: r.topics,
+        message: r.message, raw_message: r.rawMessage, correlated_event_type: r.correlatedEventType
+      }));
+      return inc;
+    });
+    const looseEvents = (logs || [])
+      .filter(l => !(l.threatKey || l.threat_key))
+      .map(r => toEvent({
+        id: r.id, threat_key: null, received_at: r.receivedAt, device_timestamp: r.deviceTimestamp,
+        severity: r.severity, source_type: r.sourceType, source_ip: r.sourceIp, transport: r.transport,
+        facility: r.facility, program: r.program, category: r.category, topics: r.topics,
+        message: r.message, raw_message: r.rawMessage, correlated_event_type: r.correlatedEventType
+      }))
+      .slice(0, looseLimit);
+    return { incidents, looseEvents, source: 'memory' };
+  }
 }
 
 async function getIncident(threatKey) {
-  if (!db.isPostgresConnected()) {
+  try {
+    const r = await db.query('SELECT * FROM threat_incidents WHERE threat_key = ?', [threatKey]);
+    if (!r || r.rows.length === 0) return null;
+    const incident = toIncident(r.rows[0]);
+    const evRes = await db.query(
+      `SELECT * FROM device_logs WHERE threat_key = ? ORDER BY received_at ASC, id ASC`,
+      [threatKey]
+    );
+    incident.events = (evRes ? evRes.rows : []).map(toEvent);
+    return incident;
+  } catch (e) {
+    // Fallback legacy: hanya bila DB tak terpasang.
+    console.warn('[ThreatTimeline] getIncident DB error, fallback memory:', e.message);
     const row = memStore().find(s => s.threatKey === threatKey);
     return row ? toIncident(row) : null;
   }
-  const r = await db.query('SELECT * FROM threat_incidents WHERE threat_key = ?', [threatKey]);
-  if (!r || r.rows.length === 0) return null;
-  const incident = toIncident(r.rows[0]);
-  const evRes = await db.query(
-    `SELECT * FROM device_logs WHERE threat_key = ? ORDER BY received_at ASC, id ASC`,
-    [threatKey]
-  );
-  incident.events = (evRes ? evRes.rows : []).map(toEvent);
-  return incident;
 }
 
 async function ack(threatKey, by) {
   const reviewer = String(by || 'operator').slice(0, 100);
-  if (!db.isPostgresConnected()) {
+  try {
+  await db.query(
+    `UPDATE threat_incidents
+        SET status = 'acknowledged', acked_at = datetime('now'), acked_by = ?
+      WHERE threat_key = ? AND status = 'open'`,
+    [reviewer, threatKey]
+  );
+  const r = await db.query('SELECT * FROM threat_incidents WHERE threat_key = ?', [threatKey]);
+  if (!r || r.rows.length === 0) return null;
+  const incident = toIncident(r.rows[0]);
+  emitThreatEvent(incident.deviceId, incident.deviceName, incident, 'ack');
+  return incident;
+  } catch (e) {
+    // Fallback legacy: hanya bila DB tak terpasang.
+    console.warn('[ThreatTimeline] ack DB error, fallback memory:', e.message);
     const row = memStore().find(s => s.threatKey === threatKey);
     if (!row) return null;
     row.status = 'acknowledged';
@@ -623,17 +692,6 @@ async function ack(threatKey, by) {
     emitThreatEvent(incident.deviceId, incident.deviceName, incident, 'ack');
     return incident;
   }
-  const r = await db.query(
-    `UPDATE threat_incidents
-        SET status = 'acknowledged', acked_at = datetime('now'), acked_by = ?
-      WHERE threat_key = ? AND status = 'open'
-      RETURNING *`,
-    [reviewer, threatKey]
-  );
-  if (!r || r.rows.length === 0) return null;
-  const incident = toIncident(r.rows[0]);
-  emitThreatEvent(incident.deviceId, incident.deviceName, incident, 'ack');
-  return incident;
 }
 
 async function status() {

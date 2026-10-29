@@ -381,12 +381,226 @@ function generateCommands(device, gaps) {
             '# Buat file /etc/rsyslog.d/99-bms-forward.conf:',
             `*.* @@${APP_IP}:${SYSLOG_PORT}`,
             '# Restart rsyslog:',
-            'systemctl restart rsyslog'
+            'systemctl restart rsyslog',
+            '# Kirim log uji (harus muncul di BMS dalam ±2 detik):',
+            'logger -p user.warning "BMS-TEST"'
+          ]
+        });
+      }
+    } else if (type === 'switch') {
+      if (gap === 'snmp') {
+        results.push({
+          id: 'enable_snmp_switch',
+          label: 'Enable SNMP on Switch',
+          urgency: 'high',
+          description: 'Aktifkan SNMP v2c read-only untuk polling port, VLAN, PoE, stacking.',
+          commands: [
+            '# Cisco IOS/IOS-XE:',
+            `snmp-server community ${community} ro`,
+            `snmp-server host ${APP_IP} traps version 2c ${community}`,
+            '# Juniper JunOS:',
+            `set snmp community ${community} authorization read-only`,
+            `set snmp trap-group BMS targets ${APP_IP}`,
+            '# Aruba/HPE:',
+            `snmp-server community ${community} operator restricted`,
+            `snmp-server host ${APP_IP} trap-version v2c ${community}`,
+            '# Generic fallback:',
+            `snmp-server community ${community} ro`
+          ]
+        });
+      }
+      if (gap === 'syslog') {
+        results.push({
+          id: 'enable_syslog_switch',
+          label: 'Configure Syslog on Switch',
+          urgency: 'high',
+          description: 'Kirim log switch (port changes, spanning tree, security) ke BMS.',
+          commands: [
+            '# Cisco IOS/IOS-XE:',
+            `logging host ${APP_IP}`,
+            `logging trap informational`,
+            `logging facility local7`,
+            '# Juniper JunOS:',
+            `set system syslog host ${APP_IP} any info`,
+            `set system syslog host ${APP_IP} authorization info`,
+            '# Aruba/HPE:',
+            `logging ${APP_IP}`,
+            `logging facility local7`,
+            '# Generic:',
+            `logging host ${APP_IP}`,
+            '# Kirim log uji — masuk-keluar config mode memicu %SYS-5-CONFIG_I:',
+            'conf t',
+            'end'
+          ]
+        });
+      }
+    } else if (type === 'firewall') {
+      if (gap === 'snmp') {
+        results.push({
+          id: 'enable_snmp_firewall',
+          label: 'Enable SNMP on Firewall',
+          urgency: 'high',
+          description: 'Polling firewall metrics: CPU, memory, sessions, throughput, VPN tunnels.',
+          commands: [
+            '# FortiGate:',
+            `config system snmp community`,
+            `  edit ${community}`,
+            `    set status enable`,
+            `    set query-v1-status enable`,
+            `    set query-v2c-status enable`,
+            `  next`,
+            `end`,
+            `config system snmp sysinfo`,
+            `  set trap-high-cpu-threshold 80`,
+            `  set trap-low-memory-threshold 80`,
+            `end`,
+            '# Palo Alto:',
+            `# Device > Server Profiles > SNMP Trap > Add: ${APP_IP}, community: ${community}`,
+            '# Generic Cisco ASA:',
+            `snmp-server community ${community} ro`,
+            `snmp-server host ${APP_IP} traps version 2c ${community}`
+          ]
+        });
+      }
+      if (gap === 'syslog') {
+        results.push({
+          id: 'enable_syslog_firewall',
+          label: 'Configure Syslog on Firewall',
+          urgency: 'high',
+          description: 'Kirim log firewall (traffic, threat, auth, config changes) ke BMS.',
+          commands: [
+            '# FortiGate:',
+            `config log syslogd setting`,
+            `  set status enable`,
+            `  set server ${APP_IP}`,
+            `  set port ${SYSLOG_PORT}`,
+            `  set format default`,
+            `end`,
+            '# Palo Alto:',
+            `# Device > Server Profiles > Syslog > Add: ${APP_IP}:${SYSLOG_PORT}, format: BSD`,
+            '# Cisco ASA:',
+            `logging host ${APP_IP}`,
+            `logging trap informational`,
+            `logging facility local7`,
+            '# Kirim log uji (FortiGate):',
+            'diagnose log test'
+          ]
+        });
+      }
+    } else if (type === 'access_point' || type === 'ap') {
+      if (gap === 'snmp') {
+        results.push({
+          id: 'enable_snmp_ap',
+          label: 'Enable SNMP on Access Point',
+          urgency: 'high',
+          description: 'Polling AP metrics: clients, channel utilization, radio stats, roaming.',
+          commands: [
+            '# Ubiquiti UniFi:',
+            `# Settings > System > SNMP: Enable, Community: ${community}, Target: ${APP_IP}`,
+            '# Cisco Meraki:',
+            `# Dashboard > Network-wide > Configure > General > SNMP: v2c, Community: ${community}, Trap IP: ${APP_IP}`,
+            '# Aruba Instant:',
+            `snmp-server community ${community} ro`,
+            `snmp-server host ${APP_IP} version 2c ${community}`,
+            '# Generic:',
+            `snmp-server community ${community} ro`
+          ]
+        });
+      }
+      if (gap === 'syslog') {
+        results.push({
+          id: 'enable_syslog_ap',
+          label: 'Configure Syslog on Access Point',
+          urgency: 'high',
+          description: 'Kirim log AP (client auth, roaming, radio events) ke BMS.',
+          commands: [
+            '# Ubiquiti UniFi:',
+            `# Settings > System > Syslog: Enable, Server: ${APP_IP}:${SYSLOG_PORT}`,
+            '# Aruba Instant:',
+            `logging ${APP_IP}`,
+            `logging facility local7`,
+            '# Generic:',
+            `logging host ${APP_IP}`,
+            '# Log uji: ubah config atau reboot — system log akan terkirim'
+          ]
+        });
+      }
+    } else if (type === 'bridge') {
+      if (gap === 'snmp') {
+        results.push({
+          id: 'enable_snmp_bridge',
+          label: 'Enable SNMP on Bridge',
+          urgency: 'high',
+          description: 'Polling bridge metrics: MAC table, STP, port states, VLANs.',
+          commands: [
+            '# MikroTik Bridge:',
+            `/snmp/set enabled=yes`,
+            `/snmp/community/add name=${community} address=0.0.0.0/0 read-access=yes`,
+            '# Generic Linux bridge (brctl):',
+            `apt-get update && apt-get install -y snmpd`,
+            `echo "rocommunity ${community}" >> /etc/snmp/snmpd.conf`,
+            `systemctl restart snmpd`
+          ]
+        });
+      }
+      if (gap === 'syslog') {
+        results.push({
+          id: 'enable_syslog_bridge',
+          label: 'Configure Syslog on Bridge',
+          urgency: 'high',
+          description: 'Kirim log bridge (STP topology changes, MAC flapping) ke BMS.',
+          commands: [
+            '# MikroTik:',
+            `/system/logging/action/add name=BMS target=remote remote=${APP_IP} remote-port=${SYSLOG_PORT}`,
+            `/system/logging/add topics=bridge action=BMS`,
+            '/system/logging/add topics=interface action=BMS',
+            '# Generic:',
+            `logging host ${APP_IP}`,
+            '# Kirim log uji MikroTik: /log warning "BMS-TEST"'
+          ]
+        });
+      }
+    } else if (type === 'gateway') {
+      if (gap === 'snmp') {
+        results.push({
+          id: 'enable_snmp_gateway',
+          label: 'Enable SNMP on Gateway',
+          urgency: 'high',
+          description: 'Polling WAN metrics, modem status, VPN tunnels, NAT sessions.',
+          commands: [
+            '# MikroTik Gateway:',
+            `/snmp/set enabled=yes contact="BMS-NOC"`,
+            `/snmp/community/add name=${community} address=0.0.0.0/0 read-access=yes`,
+            `/snmp/set trap-community=${community} trap-target=${APP_IP}`,
+            '# Generic Linux gateway:',
+            `apt-get update && apt-get install -y snmpd`,
+            `echo "rocommunity ${community}" >> /etc/snmp/snmpd.conf`,
+            `systemctl restart snmpd`
+          ]
+        });
+      }
+      if (gap === 'syslog') {
+        results.push({
+          id: 'enable_syslog_gateway',
+          label: 'Configure Syslog on Gateway',
+          urgency: 'high',
+          description: 'Kirim log gateway (WAN failover, DHCP, VPN, NAT) ke BMS.',
+          commands: [
+            '# MikroTik:',
+            `/system/logging/action/add name=BMS target=remote remote=${APP_IP} remote-port=${SYSLOG_PORT}`,
+            `/system/logging/add topics=dhcp action=BMS`,
+            `/system/logging/add topics=ipsec action=BMS`,
+            `/system/logging/add topics=ppp action=BMS`,
+            '# Generic:',
+            `logging host ${APP_IP}:${SYSLOG_PORT}`,
+            '# Kirim log uji:'
+            , '#   MikroTik:  /log warning "BMS-TEST"',
+              '#   Linux:     logger -p user.warning "BMS-TEST"'
           ]
         });
       }
     } else {
-      // Generic switch / other devices
+      // Generic fallback for other device types
       if (gap === 'snmp') {
         results.push({
           id: 'enable_snmp_generic',
@@ -410,7 +624,11 @@ function generateCommands(device, gaps) {
           commands: [
             `logging host ${APP_IP}`,
             `logging trap informational`,
-            `logging facility local7`
+            `logging facility local7`,
+            '# Log uji — sesuai platform:',
+            '#   RouterOS: /log warning "BMS-TEST"',
+            '#   Linux:    logger -p user.warning "BMS-TEST"',
+            '#   Cisco:    conf t → end (memicu %SYS-5-CONFIG_I)'
           ]
         });
       }

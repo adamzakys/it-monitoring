@@ -152,6 +152,19 @@ function ensureColumn(table, column, definition) {
   // Migrasi per-kolom (idempotent, aditif). Kolom `sort_order` — urutan tampilan
   // device custom (fitur Device Inventory drag & preset).
   ensureColumn('devices', 'sort_order', 'INTEGER DEFAULT 0');
+  // Kolom inventory vendor/model/routeros_version — diisi dari sysDescr SNMP
+  // (lihat /devices/:id/deep-dive). Absennya kolom ini membuat Device Overview
+  // selamanya menampilkan "—" meskipun device online.
+  ensureColumn('devices', 'vendor', 'VARCHAR(100)');
+  ensureColumn('devices', 'model', 'VARCHAR(150)');
+  ensureColumn('devices', 'routeros_version', 'VARCHAR(60)');
+
+  // Kolom archive insiden (fitur maintenance / Incident Auditing & Alarm
+  // Center): insiden aktif maupun resolved yang Diarsipkan bisa disembunyikan
+  // dari live feed dan dipulihkan kembali.
+  ensureColumn('incidents', 'archived_at', 'TIMESTAMP');
+  ensureColumn('incidents', 'archived_note', 'TEXT');
+  ensureColumn('incidents', 'archived_by', 'VARCHAR(100)');
 }
 
 function query(sql, params = []) {
@@ -163,14 +176,19 @@ function query(sql, params = []) {
   const isSelect = trimmed.startsWith('SELECT') || trimmed.startsWith('WITH');
   const isPragma = trimmed.startsWith('PRAGMA');
   // MySQL/PG mengembalikan baris hasil RETURNING (INSERT/UPDATE/DELETE).
-  // better-sqlite3 bisa membaca RETURNING lewat statement.all(), jadi kita
-  // perlakukan statement yang memakai RETURNING seperti query pembaca.
+  // better-sqlite3: RETURNING dikembalikan via stmt.all() sebagai array rows.
+  // Kita perlu juga capture lastInsertRowid untuk INSERT.
   const hasReturning = /RETURNING/i.test(sql);
 
   if (isSelect || isPragma || hasReturning) {
     const stmt = db.prepare(sql);
     const rows = params.length ? stmt.all(...params) : stmt.all();
-    return { rows };
+    const result = { rows };
+    // Untuk INSERT dengan RETURNING, ambil lastInsertRowid dari row terakhir
+    if (hasReturning && trimmed.startsWith('INSERT') && rows.length > 0) {
+      result.lastInsertRowid = rows[rows.length - 1].id || rows[rows.length - 1].rowid || db.lastInsertRowid;
+    }
+    return result;
   } else {
     const stmt = db.prepare(sql);
     const result = params.length ? stmt.run(...params) : stmt.run();
@@ -209,7 +227,7 @@ module.exports = {
   initDB,
   query,
   transaction,
-  isPostgresConnected: () => true, // Kept for compatibility during migration; always true for SQLite
+  isPostgresConnected: () => false, // SQLite mode - no PostgreSQL
   getMemoryStore: () => compatStore, // Backward-compat: settings in-memory + koleksi kosong
   close
 };

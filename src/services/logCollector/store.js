@@ -28,18 +28,14 @@ async function refreshDeviceCache(force = false) {
   const now = Date.now();
   if (!force && now - deviceCache.at < 30000) return deviceCache;
   const next = { at: now, byIp: new Map(), byName: new Map() };
+  // SQLite + Postgres sama-sama lewat db.query. Wajib demikian:
+  // getMemoryStore() adalah shim legacy yang koleksinya selalu kosong —
+  // memakainya membuat device cache index 0 → semua log device_id=NULL.
   try {
-    if (db.isPostgresConnected()) {
-      const r = await db.query('SELECT id, name, ip_address FROM devices');
-      for (const d of r.rows || []) {
-        if (d.ip_address) next.byIp.set(d.ip_address, d);
-        if (d.name) next.byName.set(normName(d.name), d);
-      }
-    } else {
-      for (const d of db.getMemoryStore().devices) {
-        if (d.ip_address) next.byIp.set(d.ip_address, d);
-        if (d.name) next.byName.set(normName(d.name), d);
-      }
+    const r = await db.query('SELECT id, name, ip_address FROM devices');
+    for (const d of r.rows || []) {
+      if (d.ip_address) next.byIp.set(d.ip_address, d);
+      if (d.name) next.byName.set(normName(d.name), d);
     }
   } catch (e) { /* pakai cache lama */ }
   deviceCache = next;
@@ -140,14 +136,13 @@ async function insertLog(n) {
          (device_id, source_ip, source_type, transport, facility, severity,
           program, message, raw_message, correlated_event_type, correlated_at, device_timestamp,
           topics, category, received_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-       RETURNING id`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [rec.deviceId, rec.sourceIp, rec.sourceType, rec.transport, rec.facility,
           rec.severity, rec.program, rec.message, rec.rawMessage,
           rec.correlatedEventType || null, rec.correlatedAt || null, rec.deviceTimestamp,
           rec.topics, rec.category, nowIso]
     );
-    pgId = r.rows[0].id;
+    pgId = r.lastInsertRowid;
   } catch (e) {
     console.error('[LogStore] insert failed:', e.message);
   }
@@ -182,7 +177,7 @@ async function getLogs(deviceId, limit = 200, afterId = 0) {
 
 async function cleanup(days = 7) {
   try {
-    const r = await db.query(`DELETE FROM device_logs WHERE julianday(received_at) < julianday('now', '-' || ? || ' days')`, [days]);
+    const r = await db.query(`DELETE FROM device_logs WHERE strftime('%s', received_at) < strftime('%s', 'now', '-' || ? || ' days')`, [days]);
     return r.rowCount || 0;
   } catch (e) {
     console.warn('[LogStore] cleanup error:', e.message);
@@ -242,8 +237,7 @@ async function countUnmatchedByIp(ip, sinceMs = 600000) {
     const r = await db.query(
       `SELECT COUNT(*) AS n FROM device_logs
         WHERE device_id IS NULL AND source_ip = ?
-          AND julianday(received_at) >= julianday('now', '-' || ? || ' seconds')`,
-      // julianday() tidak menerima modifier 'milliseconds' → konversi ke sekond.
+          AND strftime('%s', received_at) >= strftime('%s', 'now', '-' || ? || ' seconds')`,
       [ip, String(Math.max(1, Math.ceil(windowMs / 1000)))]
     );
     return parseInt(r.rows[0].n, 10) || 0;

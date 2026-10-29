@@ -69,19 +69,16 @@ async function sendInitialSync(ws) {
   let devices = [];
   let alerts = [];
 
-  if (db.isPostgresConnected()) {
-    try {
-      const devRes = await db.query('SELECT * FROM devices ORDER BY id ASC');
-      devices = devRes?.rows || [];
-      const alertRes = await db.query('SELECT * FROM alerts ORDER BY created_at DESC LIMIT 15');
-      alerts = alertRes?.rows || [];
-    } catch (e) {
-      devices = db.getMemoryStore().devices;
-      alerts = db.getMemoryStore().alerts;
-    }
-  } else {
-    devices = db.getMemoryStore().devices;
-    alerts = db.getMemoryStore().alerts;
+  // PostgreSQL & SQLite sama-sama lewat db.query. Wajib begitu:
+  // getMemoryStore().devices adalah shim legacy yang SELALU KOSONG di mode
+  // SQLite → runTick memproses 0 device (status/ping/loss tak pernah update).
+  try {
+    const devRes = await db.query('SELECT * FROM devices ORDER BY id ASC');
+    devices = devRes?.rows || [];
+    const alertRes = await db.query('SELECT * FROM alerts ORDER BY created_at DESC LIMIT 15');
+    alerts = alertRes?.rows || [];
+  } catch (e) {
+    console.error('[StreamService] sendInitSync DB error:', e.message);
   }
 
   if (ws.readyState === ws.OPEN) {
@@ -104,17 +101,14 @@ async function runTick() {
   const now = new Date();
   const timestamp = now.toLocaleTimeString('id-ID', { hour12: false });
 
-  // Get active devices from DB
+  // Get devices from DB (SQLite & PG sama-sama via db.query; getMemoryStore()
+  // selalu kosong di mode SQLite — penyebabnya status/latensi tidak terupdate).
   let devices = [];
-  if (db.isPostgresConnected()) {
-    try {
-      const devRes = await db.query('SELECT * FROM devices ORDER BY id ASC');
-      devices = devRes?.rows || [];
-    } catch (e) {
-      devices = db.getMemoryStore().devices;
-    }
-  } else {
-    devices = db.getMemoryStore().devices;
+  try {
+    const devRes = await db.query('SELECT * FROM devices ORDER BY id ASC');
+    devices = devRes?.rows || [];
+  } catch (e) {
+    console.error('[StreamService] runTick DB error:', e.message);
   }
 
   // 1. Evaluate metrics and health for ALL devices, in bounded-parallel chunks
@@ -205,31 +199,14 @@ async function runTick() {
  * Phase 1: switched from `exec` (shell interpolation) to `spawn` (args array).
  */
 const { spawn } = require('child_process');
-
-// Phase 1: strict target validator. Mirrors the one in routes/api.js.
-const RE_IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$/;
-const RE_IPV6 = /^(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}$|^(?:[0-9A-Fa-f]{1,4}:){1,7}:$|^::1?$|^(?:[0-9A-Fa-f]{1,4}:){1,6}(?:\d{1,3}\.){3}\d{1,3}$/;
-const RE_HOSTNAME = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?$/;
-const RE_PORT = /^(?:[1-9]\d{0,3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$/;
-const RE_COMMUNITY = /^[A-Za-z0-9_\-]{1,32}$/;
-
-function _isValidTarget(value) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 253) return false;
-  return RE_IPV4.test(value) || RE_IPV6.test(value) || RE_HOSTNAME.test(value);
-}
-function _isValidPort(value) {
-  return typeof value === 'string' && RE_PORT.test(value);
-}
-function _isValidCommunity(value) {
-  return typeof value === 'string' && RE_COMMUNITY.test(value);
-}
+const { isValidTarget, isValidPort, isValidCommunity } = require('../utils/validators');
 
 const pingCache = new Map(); // deviceId -> { latency, loss, ts }
 const snmpCache = new Map();  // deviceId -> { ifName, inMbps, outMbps, ts }
 
 async function realTimePing(ipAddress) {
   // Phase 1: reject malformed targets instead of interpolating into shell.
-  if (!_isValidTarget(ipAddress)) {
+  if (!isValidTarget(ipAddress)) {
     return { latency_ms: null, packet_loss: 100, reachable: false };
   }
   return new Promise(resolve => {
@@ -273,7 +250,7 @@ async function realTimeSnmpPoll(device) {
 
   if (!ip) { return { ok: false, error: 'no_ip', interfaces: [] }; }
   // Phase 1: refuse to spawn if any user-derived value is malformed.
-  if (!_isValidTarget(ip) || !_isValidCommunity(community) || !_isValidPort(String(port))) {
+  if (!isValidTarget(ip) || !isValidCommunity(community) || !isValidPort(String(port))) {
     return { ok: false, error: 'invalid_target', interfaces: [] };
   }
 
@@ -573,12 +550,6 @@ async function evaluateDeviceHealth(device, metric) {
 
   const track = healthTrackers.get(device.id);
 
-  // Jika tidak ada data telemetri baru dari InfluxDB (misal Telegraf/VM baru menyala),
-  // pertahankan status terakhir dan jangan reset penghitung error.
-  if (metric.has_data === false) {
-    return track.currentStatus;
-  }
-
   const isOffline = metric.packetLoss >= 100 || (metric.latency === 0 && metric.packetLoss > 0);
   const isWarning = !isOffline && (metric.packetLoss > 2 || metric.latency > 45);
 
@@ -686,7 +657,7 @@ async function triggerAlert(alertData) {
     const recent = await db.query(
       `SELECT id FROM alerts
        WHERE device_id = ? AND type = ? AND status = 'active'
-         AND julianday(created_at) >= julianday('now', '-5 minutes')
+         AND strftime('%s', created_at) >= strftime('%s', 'now', '-5 minutes')
        LIMIT 1`,
       [alertData.deviceId, alertData.type]
     );
@@ -794,6 +765,17 @@ function broadcastThreatIncident(deviceId, payload) {
   }
 }
 
+/**
+ * Clear health tracker for a device (called when device is deleted)
+ * Prevents memory leak from stale device trackers.
+ */
+function clearHealthTracker(deviceId) {
+  if (healthTrackers.has(deviceId)) {
+    healthTrackers.delete(deviceId);
+    console.log(`[StreamService] Cleared health tracker for device ${deviceId}`);
+  }
+}
+
 module.exports = {
   initStreamService,
   broadcastNewAlert,
@@ -806,5 +788,8 @@ module.exports = {
   realTimeSnmpPoll,
   getRealTimeInterfaceMbps,
   realTimePing,
-  getRealTimeSystemInfo
+  getRealTimeSystemInfo,
+  clearHealthTracker,
+  generateOrFetchMetrics,
+  evaluateDeviceHealth
 };

@@ -6,43 +6,121 @@ const influxService = require('../services/influxService');
 const streamService = require('../services/streamService');
 const topologyDiscovery = require('../services/topologyDiscovery');
 const uptimeService = require('../services/uptimeService');
+const { isValidTarget, isValidPort, isValidCommunity, isValidOid } = require('../utils/validators');
 
-// ============================================================================
-// Input Validation Utilities (Phase 1 — Security Hardening)
-// ----------------------------------------------------------------------------
-// These functions strictly validate user-supplied input before it is passed
-// into shell commands (spawn). They REJECT anything that does not match
-// a conservative pattern. They are intentionally NOT a general-purpose
-// validation library — only the fields the codebase actually consumes.
-// ============================================================================
+// =============================================================
+// SNMP Inventory Enrichment — isi vendor/model/routeros_version
+// dari sysDescr (.1.3.6.1.2.1.1.1.0) bila kolom masih kosong.
+// Best-effort: kalau device tidak merespons SNMP, dibiarkan null
+// dan UI menampilkan "—". Hanya di-query SEKALI (ketika kolom
+// kosong) — hasilnya di-cache ke tabel devices.
+// =============================================================
+const SYS_DESCR_OID = '.1.3.6.1.2.1.1.1.0';
 
-const RE_IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$/;
-const RE_IPV6 = /^(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}$|^(?:[0-9A-Fa-f]{1,4}:){1,7}:$|^::1?$|^(?:[0-9A-Fa-f]{1,4}:){1,6}(?:\d{1,3}\.){3}\d{1,3}$/;
-// RFC 1123 hostname: labels of letters/digits/hyphens, separated by dots.
-// Each label 1-63 chars, total <=253, no leading/trailing hyphen in any label.
-const RE_HOSTNAME = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?$/;
-const RE_PORT = /^(?:[1-9]\d{0,3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$/;
-const RE_COMMUNITY = /^[A-Za-z0-9_\-]{1,32}$/;
-// Numeric OID only (e.g. ".1.3.6.1.2.1.1.3.0" or "1.3.6.1.2.1.1.3.0").
-// We do NOT permit textual MIB names here because they are not user input
-// — they are constants in the codebase.
-const RE_SNMP_OID = /^\.?[0-9]+(?:\.[0-9]+)*$/;
+function snmpGetSysDescr(device, timeoutMs = 2500) {
+  const { spawn } = require('child_process');
+  const ip = device.ip_address;
+  const community = device.snmp_community || 'public';
+  const port = device.snmp_port || 161;
+  const version = device.snmp_version || '2c';
 
-function isValidTarget(value) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 253) return false;
-  return RE_IPV4.test(value) || RE_IPV6.test(value) || RE_HOSTNAME.test(value);
+  if (!ip || !isValidTarget(ip) || !isValidCommunity(community) || !isValidPort(String(port))) {
+    return Promise.resolve(null);
+  }
+
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { /* ignore */ } resolve(null); }, timeoutMs);
+    let stdout = '';
+    const child = spawn(
+      'snmpget',
+      ['-v' + version, '-c', community, '-t', '2', '-r', '0', '-On', `${ip}:${port}`, SYS_DESCR_OID],
+      { timeout: timeoutMs }
+    );
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.on('error', () => { clearTimeout(t); resolve(null); });
+    child.on('close', () => {
+      clearTimeout(t);
+      if (!stdout.trim()) return resolve(null);
+      const eqIdx = stdout.indexOf('=');
+      let value = eqIdx >= 0 ? stdout.substring(eqIdx + 1).trim() : stdout.trim();
+      // Strip tipe SNMP ("STRING: ...")
+      const colonIdx = value.indexOf(': ');
+      if (colonIdx >= 0) value = value.substring(colonIdx + 2).trim();
+      value = value.replace(/^"+|"+$/g, '').trim();
+      resolve(value || null);
+    });
+  });
 }
 
-function isValidPort(value) {
-  return typeof value === 'string' && RE_PORT.test(value);
+/**
+ * Parse sysDescr menjadi { vendor, model, routeros_version }.
+ * Vendor-agnostik best-effort; return null per field bila tak dikenal.
+ */
+function parseSysDescr(sysDescr) {
+  if (!sysDescr) return { vendor: null, model: null, routeros_version: null };
+  const s = String(sysDescr);
+  let vendor = null, model = null, version = null;
+
+  // RouterOS: "RouterOS RB750Gr3" / "RouterOS x86" / "MikroTik RouterOS ..."
+  const ros = s.match(/RouterOS(?:v[\d.]+)?\s+([\w\-.]+)/i);
+  if (ros || /mikrotik/i.test(s)) {
+    vendor = vendor || 'MikroTik';
+    model = model || (ros ? ros[1] : null);
+    const ver = s.match(/v(6\.\d+(?:\.\d+)?|7\.\d+(?:\.\d+)?)/i);
+    if (ver) version = ver[1];
+  }
+
+  // Linux: "Linux <hostname> <kernel-version> ..." 
+  const lx = s.match(/^Linux\s+\S+\s+([^\s]+)/i);
+  if (lx) {
+    vendor = vendor || 'Linux';
+    version = version || lx[1];
+  }
+
+  // Cisco IOS / IOS-XE
+  if (/Cisco IOS/i.test(s)) {
+    vendor = vendor || 'Cisco';
+    const ver = s.match(/Version\s+([\w.()]+)/i);
+    if (ver) version = version || ver[1];
+    const mod = s.match(/(C\d+[\w\-]+)/i);
+    if (mod) model = model || mod[1];
+  }
+
+  // Ubiquiti / EdgeOS / UniFi
+  if (/Ubiquiti|EdgeOS|UniFi/i.test(s)) {
+    vendor = vendor || 'Ubiquiti';
+  }
+
+  // Fallback generik: vendor = kata pertama sebelum spasi
+  if (!vendor) {
+    const first = s.split(/[^A-Za-z0-9]+/).filter(Boolean)[0];
+    if (first) vendor = first;
+  }
+
+  return { vendor, model, routeros_version: version };
 }
 
-function isValidCommunity(value) {
-  return typeof value === 'string' && RE_COMMUNITY.test(value);
-}
+async function enrichDeviceInventory(device) {
+  // Kolom sudah terisi → lewati (cache).
+  if (device.vendor && device.model) {
+    return device;
+  }
+  const sysDescr = await snmpGetSysDescr(device);
+  if (!sysDescr) return device;
+  const parsed = parseSysDescr(sysDescr);
+  const updates = {};
+  if (!device.vendor && parsed.vendor) updates.vendor = parsed.vendor;
+  if (!device.model && parsed.model) updates.model = parsed.model;
+  if (!device.routeros_version && parsed.routeros_version) updates.routeros_version = parsed.routeros_version;
 
-function isValidOid(value) {
-  return typeof value === 'string' && value.length > 0 && value.length <= 128 && RE_SNMP_OID.test(value);
+  if (Object.keys(updates).length > 0) {
+    const sets = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+    await db.query(`UPDATE devices SET ${sets} WHERE id = ?`,
+      [...Object.values(updates), device.id]);
+    console.log(`[Inventory] Device ${device.id} enriched: ${JSON.stringify(updates)}`);
+    Object.assign(device, updates);
+  }
+  return device;
 }
 
 /**
@@ -110,60 +188,45 @@ function safeError(err, fallback = 'Internal server error') {
 // 1. KPI & Global Summary Endpoint
 router.get('/kpi', async (req, res) => {
   try {
-    let devices = [];
-    if (db.isPostgresConnected()) {
-      const devRes = await db.query('SELECT * FROM devices');
-      devices = devRes.rows;
-    } else {
-      devices = db.getMemoryStore().devices;
-    }
+    const devRes = await db.query('SELECT * FROM devices ORDER BY sort_order ASC, id ASC');
+    const devices = devRes.rows;
 
     const total = devices.length;
     const online = devices.filter(d => d.status === 'online').length;
     const offline = devices.filter(d => d.status === 'offline').length;
     const warning = devices.filter(d => d.status === 'warning').length;
 
-    // SLA 30 hari RIIL: daily_uptime diisi dari InfluxDB ping oleh
-    // uptimeService (jangan pernah fallback ke deret sintetis).
+    // SLA 30 hari RIIL: daily_uptime diisi dari InfluxDB ping oleh uptimeService
     let uptime30d = 100;
     let trendline = [];
     let dailyBreakdown = [];
 
-    if (db.isPostgresConnected()) {
-      // Seed daily_uptime dari data ping InfluxDB (lazy, cache 5 menit)
-      try {
-        await uptimeService.ensureDailyUptime();
-      } catch (e) {
-        console.warn('[KPI] daily uptime sync failed:', e.message);
-      }
+    // Seed daily_uptime dari data ping InfluxDB (lazy, cache 5 menit)
+    try {
+      await uptimeService.ensureDailyUptime();
+    } catch (e) {
+      console.warn('[KPI] daily uptime sync failed:', e.message);
+    }
 
-      try {
-        const upRes = await db.query(
-          `SELECT date, uptime_percentage FROM daily_uptime
-           WHERE date >= date('now', '-30 days')
-           ORDER BY date ASC`
-        );
-        if (upRes.rows.length > 0) {
-          dailyBreakdown = upRes.rows.map(r => ({
-            date: pgDateToStr(r.date),
-            pct: parseFloat(r.uptime_percentage)
-          }));
-          trendline = dailyBreakdown.map(d => d.pct);
-          // Rata-rata SLA dari hari-hari yang benar-benar punya data
-          const sum = dailyBreakdown.reduce((acc, d) => acc + d.pct, 0);
-          uptime30d = parseFloat((sum / dailyBreakdown.length).toFixed(2));
-        } else {
-          // Belum ada satu hari pun data riil → pakai status terkini sebagai
-          // indikator, TANPA trendline buatan (sparkline kosong = jujur).
-          uptime30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
-          trendline = [];
-        }
-      } catch (e) {
+    try {
+      const upRes = await db.query(
+        `SELECT date, uptime_percentage FROM daily_uptime
+         WHERE date >= date('now', '-30 days')
+         ORDER BY date ASC`
+      );
+      if (upRes.rows.length > 0) {
+        dailyBreakdown = upRes.rows.map(r => ({
+          date: pgDateToStr(r.date),
+          pct: parseFloat(r.uptime_percentage)
+        }));
+        trendline = dailyBreakdown.map(d => d.pct);
+        const sum = dailyBreakdown.reduce((acc, d) => acc + d.pct, 0);
+        uptime30d = parseFloat((sum / dailyBreakdown.length).toFixed(2));
+      } else {
         uptime30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
         trendline = [];
       }
-    } else {
-      // Memory mode: hitung dari status device aktif (tanpa data sintetis)
+    } catch (e) {
       uptime30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
       trendline = [];
     }
@@ -178,7 +241,7 @@ router.get('/kpi', async (req, res) => {
       online_count: online,
       offline_count: offline,
       warning_count: warning,
-      db_connected: db.isPostgresConnected(),
+      db_connected: false, // SQLite mode
       last_updated: new Date().toISOString()
     });
   } catch (err) {
@@ -189,64 +252,11 @@ router.get('/kpi', async (req, res) => {
 // 2. Devices CRUD
 router.get('/devices', async (req, res) => {
   try {
-    let devices = [];
-    let interfaces = [];
+    const devRes = await db.query('SELECT * FROM devices ORDER BY sort_order ASC, id ASC');
+    const devices = devRes.rows;
 
-    if (db.isPostgresConnected()) {
-      const devRes = await db.query('SELECT * FROM devices ORDER BY sort_order ASC, id ASC');
-      devices = devRes.rows;
-
-      // Sync interfaces from InfluxDB dynamically for each device (with IP fallback)
-      for (const dev of devices) {
-        const actualIfaces = await influxService.getDeviceInterfaces(dev.id, dev.ip_address);
-        if (actualIfaces.length > 0) {
-          // Delete default templates if we have real interfaces now
-          await db.query(
-            `DELETE FROM interfaces WHERE device_id = ? AND (interface_name = 'ether1-WAN' OR interface_name = 'ether2-LAN')`,
-            [dev.id]
-          );
-          // Insert actual interfaces
-          for (const ifaceName of actualIfaces) {
-            await db.query(
-              `INSERT INTO interfaces (device_id, interface_name, status, speed_bps)
-               VALUES (?, ?, 'up', 1000000000)
-               ON CONFLICT(device_id, interface_name) DO NOTHING`,
-              [dev.id, ifaceName]
-            );
-          }
-        }
-      }
-
-      const ifaceRes = await db.query('SELECT * FROM interfaces ORDER BY id ASC');
-      interfaces = ifaceRes.rows;
-    } else {
-      devices = db.getMemoryStore().devices;
-
-      // Sync interfaces in Memory Store
-      for (const dev of devices) {
-        const actualIfaces = await influxService.getDeviceInterfaces(dev.id, dev.ip_address);
-        if (actualIfaces.length > 0) {
-          const store = db.getMemoryStore();
-          // Remove default templates
-          store.interfaces = store.interfaces.filter(
-            i => !(i.device_id === dev.id && (i.interface_name === 'ether1-WAN' || i.interface_name === 'ether2-LAN'))
-          );
-          // Add actual interfaces
-          for (const ifaceName of actualIfaces) {
-            if (!store.interfaces.some(i => i.device_id === dev.id && i.interface_name === ifaceName)) {
-              store.interfaces.push({
-                id: Date.now() + Math.random(),
-                device_id: dev.id,
-                interface_name: ifaceName,
-                status: 'up',
-                speed_bps: 1000000000
-              });
-            }
-          }
-        }
-      }
-      interfaces = db.getMemoryStore().interfaces;
-    }
+    const ifaceRes = await db.query('SELECT * FROM interfaces ORDER BY id ASC');
+    const interfaces = ifaceRes.rows;
 
     // Attach interfaces to each device
     const enriched = devices.map(d => ({
@@ -258,6 +268,45 @@ router.get('/devices', async (req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
   }
+});
+
+// Background job: sync interfaces for all devices from InfluxDB
+// Called periodically and on-demand
+async function syncAllDeviceInterfaces() {
+  try {
+    const devRes = await db.query('SELECT id, ip_address FROM devices');
+    const devices = devRes.rows;
+
+    for (const dev of devices) {
+      const actualIfaces = await influxService.getDeviceInterfaces(dev.id, dev.ip_address);
+      if (actualIfaces.length > 0) {
+        // Delete default templates if we have real interfaces now (seed uses 'ether1', 'enp0s3')
+        await db.query(
+          `DELETE FROM interfaces WHERE device_id = ? AND (interface_name = 'ether1' OR interface_name = 'enp0s3')`,
+          [dev.id]
+        );
+        // Insert actual interfaces
+        for (const ifaceName of actualIfaces) {
+          await db.query(
+            `INSERT INTO interfaces (device_id, interface_name, status, speed_bps)
+             VALUES (?, ?, 'up', 1000000000)
+             ON CONFLICT(device_id, interface_name) DO NOTHING`,
+            [dev.id, ifaceName]
+          );
+        }
+      }
+    }
+    console.log('[InterfaceSync] Background sync completed for', devices.length, 'devices');
+  } catch (err) {
+    console.error('[InterfaceSync] Background sync error:', err.message);
+  }
+}
+
+// Manual trigger endpoint for interface sync
+router.post('/devices/sync-interfaces', async (req, res) => {
+  // Run in background, don't block response
+  syncAllDeviceInterfaces().catch(() => {});
+  res.json({ success: true, message: 'Interface sync triggered in background' });
 });
 
 router.post('/devices', async (req, res) => {
@@ -289,12 +338,14 @@ router.post('/devices', async (req, res) => {
 
     const result = await db.query(
       `INSERT INTO devices (name, ip_address, device_type, snmp_community, snmp_version, snmp_port, polling_interval, status, ping_latency, packet_loss, last_seen)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')) RETURNING *`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
       [name, ip_address, device_type || 'router', snmp_community || 'public', snmp_version || '2c', portVal, intervalVal,
        pingResult.reachable ? 'online' : 'offline',
        pingResult.latency_ms, pingResult.packet_loss]
     );
-    newDevice = result.rows[0];
+    const newId = result.lastInsertRowid;
+    const deviceRes = await db.query('SELECT * FROM devices WHERE id = ?', [newId]);
+    newDevice = deviceRes.rows[0];
 
     // Auto-generate Telegraf config & reload
     const telegrafSync = telegrafManager.syncDeviceConfig(newDevice);
@@ -366,6 +417,9 @@ router.delete('/devices/:id', async (req, res) => {
 
     // Remove Telegraf config & reload
     telegrafManager.removeDeviceConfig(id);
+
+    // Clear health tracker for deleted device (prevents memory leak)
+    streamService.clearHealthTracker(id);
 
     res.json({ success: true, message: `Device ${id} deleted and Telegraf config removed.` });
   } catch (err) {
@@ -553,11 +607,12 @@ router.put('/devices/:id', async (req, res) => {
       `UPDATE devices
        SET name = ?, ip_address = ?, device_type = ?, snmp_community = ?,
            snmp_version = ?, snmp_port = ?, polling_interval = ?
-       WHERE id = ? RETURNING *`,
+       WHERE id = ? `,
       [name, ip_address, device_type || 'router', snmp_community || 'public',
        snmp_version || '2c', portVal, intervalVal, id]
     );
-    updatedDevice = result.rows[0];
+    const deviceRes = await db.query('SELECT * FROM devices WHERE id = ?', [id]);
+    updatedDevice = deviceRes.rows[0];;
     if (!updatedDevice) {
       return res.status(404).json({ success: false, error: 'Device not found' });
     }
@@ -590,6 +645,18 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Device not found' });
     }
     if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
+
+    // 1b. Enrich inventory (vendor/model/routeros_version) dari sysDescr SNMP
+    // bila masih kosong; hasil di-cache ke tabel devices. Dibungkus budget
+    // agar SNMP lambat tidak menahan respons deep-dive.
+    try {
+      device = await new Promise((resolve) => {
+        const t = setTimeout(() => resolve(device), 3500);
+        enrichDeviceInventory(device).then(d => { clearTimeout(t); resolve(d); }).catch(() => { clearTimeout(t); resolve(device); });
+      });
+    } catch (e) {
+      // Best-effort — jangan menggagalkan deep-dive bila SNMP sysDescr gagal.
+    }
 
     // 2. InfluxDB queries in parallel
     const [interfaces, latencyHist, lossHist, throughputRates, systemMetrics, errorCounters] = await Promise.all([
@@ -720,10 +787,17 @@ router.get('/devices/:id/deep-dive', async (req, res) => {
     }
 
     // Storage = mount filesystem nyata saja. "/" = Primary Storage.
-    // Mount internal systemd (/run/credentials/*) adalah unit ephemeral
-    // 256 KiB tanpa makna kapasitas → tidak ditampilkan.
+    // Dikecualikan:
+    //  - Mount internal systemd (/run/credentials/*) — unit ephemeral 256 KiB.
+    //  - Pseudo/tmpfs filesystem (devtmpfs, tmpfs, ramfs, shm, run/lock,
+    //    /run/user/*) — bukan storage persisten; hanya menimbulkan deretan
+    //    baris yang tampak seperti disk penuh padahal bukan.
+    //  - /proc, /sys, /dev, /run, /tmp — virtual kernel & tmpfs.
+    const PSEUDO_FS = /(^|\/)(dev|proc|sys|tmp|shm|lock|run|var\/run|credentials|snap\/)(\/|$)|(^|\/)(devtmpfs|tmpfs|ramfs|overlay|proc|sysfs|cgroup|securityfs|debugfs|tracefs|pstore|bpf|configfs|fusectl|hugetlbfs|mqueue|nsfs)(\/|$)/i;
     const mountEntries = storageEntriesBytes
-      .filter(e => roleOf(e) === 'mount' && e.total_bytes > 0 && !/^\/run\/credentials(\/|$)/.test(e.descr))
+      .filter(e => roleOf(e) === 'mount' && e.total_bytes > 0
+        && !PSEUDO_FS.test(e.descr)
+        && !/^\/run\/credentials(\/|$)/.test(e.descr))
       .sort((a, b) => (a.descr === '/' ? -1 : b.descr === '/' ? 1 : a.descr.localeCompare(b.descr)));
 
     const swapEntry = storageEntriesBytes.find(e => roleOf(e) === 'swap');
@@ -1239,7 +1313,39 @@ router.get('/incidents', async (req, res) => {
     const incidentManager = require('../services/incidentManager');
     const active = await incidentManager.getAllActiveIncidents();
     const history = await incidentManager.getIncidentHistory(50);
-    res.json({ success: true, active, history });
+    const archived = await incidentManager.getArchivedIncidents(100);
+    res.json({ success: true, active, history, archived });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// POST /api/incidents/:id/archive — sembunyikan insiden dari live feed
+// (mode maintenance). Notifikasi berhenti mengganggu, engine tetap melacak
+// hingga device pulih (auto-unarchive saat resolved).
+router.post('/incidents/:id/archive', async (req, res) => {
+  try {
+    const incidentManager = require('../services/incidentManager');
+    const note = (req.body && typeof req.body.note === 'string') ? req.body.note : null;
+    const incident = await incidentManager.archiveIncident(req.params.id, { note, by: 'operator' });
+    if (!incident) {
+      return res.status(404).json({ success: false, error: 'Incident not found' });
+    }
+    res.json({ success: true, message: 'Insiden diarsipkan (mode maintenance)', incident });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// POST /api/incidents/:id/unarchive — kembalikan insiden ke live feed.
+router.post('/incidents/:id/unarchive', async (req, res) => {
+  try {
+    const incidentManager = require('../services/incidentManager');
+    const incident = await incidentManager.unarchiveIncident(req.params.id);
+    if (!incident) {
+      return res.status(404).json({ success: false, error: 'Incident not found' });
+    }
+    res.json({ success: true, message: 'Insiden dikembalikan ke live feed', incident });
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
   }
@@ -1345,32 +1451,28 @@ router.get('/live-feed', async (req, res) => {
 router.get('/reports/sla', async (req, res) => {
   try {
     // Seed daily_uptime dari data ping InfluxDB sebelum membaca tabel
-    if (db.isPostgresConnected()) {
-      try {
-        await uptimeService.ensureDailyUptime();
-      } catch (e) {
-        console.warn('[Reports] daily uptime sync failed:', e.message);
-      }
+    try {
+      await uptimeService.ensureDailyUptime();
+    } catch (e) {
+      console.warn('[Reports] daily uptime sync failed:', e.message);
     }
 
     let daily = [];
-    if (db.isPostgresConnected()) {
-      try {
-        const r = await db.query(
-          `SELECT date, total_checks, successful_checks, uptime_percentage
-           FROM daily_uptime
-           WHERE date >= date('now', '-30 days')
-           ORDER BY date ASC`
-        );
-        daily = r.rows.map(row => ({
-          date: pgDateToStr(row.date),
-          total_checks: parseInt(row.total_checks, 10) || 0,
-          successful_checks: parseInt(row.successful_checks, 10) || 0,
-          uptime_percentage: parseFloat(row.uptime_percentage)
-        }));
-      } catch (e) {
-        daily = [];
-      }
+    try {
+      const r = await db.query(
+        `SELECT date, total_checks, successful_checks, uptime_percentage
+         FROM daily_uptime
+         WHERE date >= date('now', '-30 days')
+         ORDER BY date ASC`
+      );
+      daily = r.rows.map(row => ({
+        date: pgDateToStr(row.date),
+        total_checks: parseInt(row.total_checks, 10) || 0,
+        successful_checks: parseInt(row.successful_checks, 10) || 0,
+        uptime_percentage: parseFloat(row.uptime_percentage)
+      }));
+    } catch (e) {
+      daily = [];
     }
 
     // Hitung SLA 30 hari riil
@@ -1380,13 +1482,8 @@ router.get('/reports/sla', async (req, res) => {
       sla30d = parseFloat((sum / daily.length).toFixed(2));
     } else {
       // fallback: hitung dari device status saat ini
-      let devices = [];
-      if (db.isPostgresConnected()) {
-        const dr = await db.query('SELECT status FROM devices');
-        devices = dr.rows;
-      } else {
-        devices = db.getMemoryStore().devices;
-      }
+      const devRes = await db.query('SELECT status FROM devices');
+      const devices = devRes.rows;
       const total = devices.length;
       const online = devices.filter(d => d.status === 'online').length;
       sla30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
@@ -1411,13 +1508,8 @@ router.get('/reports/sla', async (req, res) => {
 
     if (!summary.has_data) {
       // Fallback: hitung dari kolom ping_latency & packet_loss di devices
-      let devices = [];
-      if (db.isPostgresConnected()) {
-        const dr = await db.query('SELECT ping_latency, packet_loss FROM devices');
-        devices = dr.rows;
-      } else {
-        devices = db.getMemoryStore().devices;
-      }
+      const dr = await db.query('SELECT ping_latency, packet_loss FROM devices');
+      const devices = dr.rows;
       if (devices.length > 0) {
         summary.avg_latency_ms = parseFloat((devices.reduce((s, d) => s + (parseFloat(d.ping_latency) || 0), 0) / devices.length).toFixed(2));
         summary.avg_packet_loss = parseFloat((devices.reduce((s, d) => s + (parseFloat(d.packet_loss) || 0), 0) / devices.length).toFixed(3));
@@ -1537,7 +1629,10 @@ router.post('/settings', (req, res) => {
     try {
       telegrafManager.refreshOutputConfig();
       telegrafManager.triggerReload();
-      console.log('[Settings] InfluxDB token updated → 00-output.conf rewritten & Telegraf reload triggered');
+      // Force refresh InfluxDB client with new token
+      const influxService = require('../services/influxService');
+      influxService.resetClient();
+      console.log('[Settings] InfluxDB token updated → 00-output.conf rewritten, Telegraf reload triggered, InfluxDB client refreshed');
     } catch (e) {
       console.warn('[Settings] Failed to refresh telegraf config:', e.message);
     }
@@ -1587,33 +1682,23 @@ router.post('/settings/test-influx', async (req, res) => {
 // GET /api/topology — return nodes (devices) + edges (device_links) for Vis.js Network
 router.get('/topology', async (req, res) => {
   try {
-    let devices = [];
-    if (db.isPostgresConnected()) {
-      const r = await db.query('SELECT id, name, ip_address, status, device_type FROM devices ORDER BY id ASC');
-      devices = r.rows;
-    } else {
-      devices = db.getMemoryStore().devices;
-    }
+    const devRes = await db.query('SELECT id, name, ip_address, status, device_type FROM devices ORDER BY id ASC');
+    const devices = devRes.rows;
 
     let links = [];
-    if (db.isPostgresConnected()) {
-      // Link stale SENGAJA ikut dikirim: frontend merendernya sebagai edge
-      // merah putus-putus agar operator tahu link terakhir yang diketahui,
-      // bukan kehilangan informasi saat satu siklus discovery gagal.
-      const r = await db.query(
-        `SELECT id, source_device_id, source_interface, target_chassis_id, target_sys_name,
-                target_port_id, target_port_desc, target_ip, manual_ipv4, target_device_id, protocol,
-                last_seen, stale
-         FROM device_links
-         ORDER BY id ASC`
-      );
-      // SQLite menyimpan BOOLEAN sebagai 0/1; normalisasi agar logika
-      // `stale === true` di bawah (dan render frontend) tetap benar.
-      links = r.rows.map(l => ({ ...l, stale: !!Number(l.stale) }));
-    } else {
-      const store = db.getMemoryStore();
-      links = (store.device_links || []);
-    }
+    // Link stale SENGAJA ikut dikirim: frontend merendernya sebagai edge
+    // merah putus-putus agar operator tahu link terakhir yang diketahui,
+    // bukan kehilangan informasi saat satu siklus discovery gagal.
+    const r = await db.query(
+      `SELECT id, source_device_id, source_interface, target_chassis_id, target_sys_name,
+              target_port_id, target_port_desc, target_ip, manual_ipv4, target_device_id, protocol,
+              last_seen, stale
+       FROM device_links
+       ORDER BY id ASC`
+    );
+    // SQLite menyimpan BOOLEAN sebagai 0/1; normalisasi agar logika
+    // `stale === true` di bawah (dan render frontend) tetap benar.
+    links = r.rows.map(l => ({ ...l, stale: !!Number(l.stale) }));
 
     // Build nodes for Vis.js
     const nodes = devices.map(d => ({
@@ -1681,7 +1766,7 @@ router.get('/topology', async (req, res) => {
         const key = link.target_chassis_id || link.target_sys_name || `unmanaged-${link.id}`;
         if (!unmanagedNodes.has(key)) {
           const allCands = Array.from(ipMapByUnmanagedKey.get(key) || new Set());
-          
+
           // PRIORITY ORDER: 1) manual_ipv4 > 2) IPv4 Global otomatis > 3) IPv6 Link-Local
           let preferredIp = null;
           const manualIp = manualIpv4MapByUnmanagedKey.get(key);
@@ -1804,14 +1889,7 @@ router.put('/topology/manual-ip/:linkId', async (req, res) => {
     if (ipAddr && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ipAddr)) {
       return res.status(400).json({ success: false, error: 'Format IPv4 tidak valid' });
     }
-    if (db.isPostgresConnected()) {
-      await db.query('UPDATE device_links SET manual_ipv4 = ? WHERE id = ?', [ipAddr, linkId]);
-    } else {
-      const store = db.getMemoryStore();
-      const links = store.device_links || [];
-      const link = links.find(l => l.id === linkId);
-      if (link) link.manual_ipv4 = ipAddr;
-    }
+    await db.query('UPDATE device_links SET manual_ipv4 = ? WHERE id = ?', [ipAddr, linkId]);
     res.json({ success: true, message: 'Manual IPv4 berhasil diperbarui', manual_ipv4: ipAddr });
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
@@ -1821,30 +1899,19 @@ router.put('/topology/manual-ip/:linkId', async (req, res) => {
 // GET /api/topology/status — status terakhir discovery
 router.get('/topology/status', async (req, res) => {
   try {
+    const r = await db.query(
+      `SELECT MAX(last_seen) AS last_seen,
+              COUNT(*) AS total,
+              SUM(CASE WHEN stale = 0 THEN 1 ELSE 0 END) AS active
+       FROM device_links`
+    );
     let lastSeen = null;
     let totalLinks = 0;
     let activeLinks = 0;
-    if (db.isPostgresConnected()) {
-      const r = await db.query(
-        `SELECT MAX(last_seen) AS last_seen,
-                COUNT(*) AS total,
-                SUM(CASE WHEN stale = 0 THEN 1 ELSE 0 END) AS active
-         FROM device_links`
-      );
-      if (r.rows[0]) {
-        lastSeen = r.rows[0].last_seen;
-        totalLinks = parseInt(r.rows[0].total, 10) || 0;
-        activeLinks = parseInt(r.rows[0].active, 10) || 0;
-      }
-    } else {
-      const store = db.getMemoryStore();
-      const links = store.device_links || [];
-      totalLinks = links.length;
-      activeLinks = links.filter(l => !l.stale).length;
-      if (links.length > 0) {
-        lastSeen = links.reduce((max, l) =>
-          l.last_seen > max ? l.last_seen : max, links[0].last_seen);
-      }
+    if (r.rows[0]) {
+      lastSeen = r.rows[0].last_seen;
+      totalLinks = parseInt(r.rows[0].total, 10) || 0;
+      activeLinks = parseInt(r.rows[0].active, 10) || 0;
     }
     res.json({
       success: true,
@@ -1859,3 +1926,4 @@ router.get('/topology/status', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.syncAllDeviceInterfaces = syncAllDeviceInterfaces;

@@ -17,6 +17,9 @@ const state = {
   alerts: [],
   activeIncidents: [],
   incidentHistory: [],
+  archivedIncidents: [],
+  incidentFeedMode: 'active',
+  alertsPageMode: 'live',
   ws: null,
   charts: {
     traffic: null,
@@ -212,6 +215,7 @@ async function loadInitialData() {
     if (incidentRes.success) {
       state.activeIncidents = incidentRes.active || [];
       state.incidentHistory = incidentRes.history || [];
+      state.archivedIncidents = incidentRes.archived || [];
       renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
     }
     if (feedRes.success) {
@@ -406,9 +410,13 @@ function initCharts() {
 }
 
 let reconnectTimer = null;
+let wsRetryCount = 0;
+const WS_MAX_RETRIES = 10;
+const WS_BASE_DELAY = 3000;
+const WS_MAX_DELAY = 30000;
 
 /**
- * Establishes Persistent WebSocket Connection with Auto-Reconnect
+ * Establishes Persistent WebSocket Connection with Auto-Reconnect (Exponential Backoff)
  */
 function connectWebSocket() {
   if (reconnectTimer) {
@@ -434,11 +442,12 @@ function connectWebSocket() {
   } catch (err) {
     pill.classList.add('disconnected');
     statusText.textContent = 'Disconnected';
-    reconnectTimer = setTimeout(connectWebSocket, 3000);
+    scheduleReconnect();
     return;
   }
 
   state.ws.onopen = () => {
+    wsRetryCount = 0; // Reset retry count on successful connection
     pill.classList.remove('disconnected');
     statusText.textContent = 'Live 1s Feed';
     subscribeSelectedStream();
@@ -456,15 +465,29 @@ function connectWebSocket() {
   state.ws.onclose = () => {
     pill.classList.add('disconnected');
     statusText.textContent = 'Reconnecting...';
-    if (!reconnectTimer) {
-      reconnectTimer = setTimeout(connectWebSocket, 3000);
-    }
+    scheduleReconnect();
   };
 
   state.ws.onerror = () => {
     pill.classList.add('disconnected');
     statusText.textContent = 'Offline';
   };
+}
+
+function scheduleReconnect() {
+  if (wsRetryCount >= WS_MAX_RETRIES) {
+    const pill = document.getElementById('ws-status-pill');
+    const statusText = document.getElementById('ws-status-text');
+    pill.classList.add('disconnected');
+    statusText.textContent = 'Max retries reached. Refresh page.';
+    return;
+  }
+
+  const delay = Math.min(WS_BASE_DELAY * Math.pow(2, wsRetryCount), WS_MAX_DELAY);
+  statusText.textContent = `Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${wsRetryCount + 1}/${WS_MAX_RETRIES})...`;
+  
+  wsRetryCount++;
+  reconnectTimer = setTimeout(connectWebSocket, delay);
 }
 
 function subscribeSelectedStream() {
@@ -534,7 +557,8 @@ function handleWsMessage(msg) {
     const incident = msg.incident;
     if (incident && incident.incidentId) {
       const exists = state.activeIncidents.find(i => i.incidentId === incident.incidentId);
-      if (!exists) {
+      // Insiden yang sedang diarsipkan (maintenance) tetap tidak dirender live.
+      if (!exists && !(incident.archivedAt || incident.archived_at)) {
         state.activeIncidents.unshift(incident);
       }
       if (state.activePanelTab === 'incidents') {
@@ -873,42 +897,94 @@ function renderDeviceGrid() {
       else if (lossVal > 0) lossColor = 'var(--color-warning)';
     }
 
+    let latColor = 'inherit';
+    const latVal = parseFloat(dev.ping_latency);
+    if (Number.isFinite(latVal) && latVal > 45) latColor = 'var(--color-warning)';
+
     const latText = formatMetric(dev.ping_latency, 'ms', '--');
     const lossText = formatMetric(dev.packet_loss, '%', '--');
     const ifaceCount = ((dev.interfaces || []).length);
-    const ifaceText = ifaceCount === 0 ? '--' : (ifaceCount === 1 ? '1 port' : ifaceCount + ' ports');
-    const dotClass = 'status-dot ' + (dev.status || 'unknown');
-    const statusText = (dev.status || 'unknown');
+    const ifaceText = ifaceCount === 0 ? '--' : (ifaceCount === 1 ? '1' : ifaceCount);
+    const statusKey = dev.status || 'unknown';
+    const statusLabel = (dev.status || 'unknown');
     const typeLabel = deviceTypeLabel(dev.device_type);
     const orderNo = deviceOrderNumber(dev.id);
 
     card.innerHTML =
-      '<div class="card-top">' +
-        '<span class="device-order-badge" title="Urutan #' + orderNo + ' — drag ke lokasi lain untuk mengurutkan">' + orderNo + '</span>' +
-        '<div class="status-dot-wrap"><span class="' + dotClass + '"></span><span class="status-text ' + statusText + '">' + statusText + '</span></div>' +
-        '<a href="#" class="card-detail-link card-detail-top" data-device-id="' + dev.id + '">View details &rarr;</a>' +
+      '<div class="card-topline">' +
+        '<span class="device-order-badge" title="Urutan #' + orderNo + ' — drag ke lokasi lain untuk mengurutkan">#' + orderNo + '</span>' +
+        '<div class="device-status-pill ' + statusKey + '"><span class="pill-dot"></span><span class="status-text">' + statusLabel + '</span></div>' +
       '</div>' +
-      '<div class="card-title">' + escapeHtml(dev.name) + '</div>' +
-      '<div class="card-ip">' + escapeHtml(dev.ip_address) + '</div>' +
-      '<div class="card-type">' + deviceIconSvg(dev.device_type, 13) + '<span class="card-type-label">' + escapeHtml(typeLabel) + '</span></div>' +
-      '<div class="card-stats-row">' +
-        '<div class="stat-item"><span class="stat-label">Response Time</span><span class="stat-val" id="card-lat-' + dev.id + '">' + latText + '</span></div>' +
-        '<div class="stat-item"><span class="stat-label">Packet Loss</span><span class="stat-val" id="card-loss-' + dev.id + '" style="color:' + lossColor + '">' + lossText + '</span></div>' +
-        '<div class="stat-item"><span class="stat-label">Interfaces</span><span class="stat-val">' + ifaceText + '</span></div>' +
+      '<div class="card-main">' +
+        '<div class="card-title-line">' +
+          '<h3 class="card-title" title="' + escapeHtml(dev.name) + '">' + escapeHtml(dev.name) + '</h3>' +
+          '<span class="card-type-badge">' + deviceIconSvg(dev.device_type, 11) + escapeHtml(typeLabel) + '</span>' +
+        '</div>' +
+        '<div class="card-meta-line">' +
+          '<span class="card-ip" title="IP Address">' + escapeHtml(dev.ip_address) + '</span>' +
+          '<span class="card-sep">·</span>' +
+          '<span class="card-ifaces" title="Jumlah interface">' + ifaceText + ' port' + (ifaceCount !== 1 ? 's' : '') + '</span>' +
+        '</div>' +
+        '<div class="card-strip">' +
+          '<span class="strip-item" title="Response Time (ms)">' +
+            '<span class="strip-label">Latency</span>' +
+            '<span class="strip-value" id="card-lat-' + dev.id + '" style="color:' + latColor + '">' + latText + '</span>' +
+          '</span>' +
+          '<span class="strip-item" title="Packet Loss (%)">' +
+            '<span class="strip-label">Loss</span>' +
+            '<span class="strip-value" id="card-loss-' + dev.id + '" style="color:' + lossColor + '">' + lossText + '</span>' +
+          '</span>' +
+          '<span class="strip-item" title="Jumlah interface aktif">' +
+            '<span class="strip-label">Ports</span>' +
+            '<span class="strip-value">' + ifaceText + '</span>' +
+          '</span>' +
+        '</div>' +
+        '<div class="card-actions">' +
+          '<a href="#" class="card-btn card-btn-view" data-device-id="' + dev.id + '" title="Lihat detail lengkap device">' +
+            '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>Detail' +
+          '</a>' +
+          '<button class="card-btn card-btn-logs" data-device-id="' + dev.id + '" title="Lihat log / archive device">' +
+            '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/></svg>Logs' +
+          '</button>' +
+          '<button class="card-btn card-btn-incidents" data-device-id="' + dev.id + '" title="Lihat incident / threat timeline device">' +
+            '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Incidents' +
+          '</button>' +
+        '</div>' +
       '</div>';
 
     card.addEventListener('click', function (e) {
-      // If the click was on the detail link, ignore here and let the link handle it
-      if (e.target && e.target.classList && e.target.classList.contains('card-detail-link')) return;
+      // If the click was on an action button, ignore here and let the button handle it
+      if (e.target && e.target.closest && e.target.closest('.card-btn')) return;
       selectDevice(dev.id);
     });
 
-    const detailLink = card.querySelector('.card-detail-link');
-    if (detailLink) {
-      detailLink.addEventListener('click', function (e) {
+    // Detail link (View button)
+    const viewBtn = card.querySelector('.card-btn-view');
+    if (viewBtn) {
+      viewBtn.addEventListener('click', function (e) {
         e.preventDefault();
         e.stopPropagation();
         openDeviceDetail(dev.id);
+      });
+    }
+
+    // Logs button
+    const logsBtn = card.querySelector('.card-btn-logs');
+    if (logsBtn) {
+      logsBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        openDeviceLogs(dev.id);
+      });
+    }
+
+    // Incidents button
+    const incidentsBtn = card.querySelector('.card-btn-incidents');
+    if (incidentsBtn) {
+      incidentsBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        openDeviceIncidents(dev.id);
       });
     }
 
@@ -992,14 +1068,15 @@ function updateCardTelemetry(deviceId, latency, loss, status) {
     else if (devStatus === 'warning') card.classList.add('fault-warning');
     else if (devStatus === 'online') card.classList.add('fault-online');
 
-    const dot = card.querySelector('.status-dot');
-    if (dot) {
-      dot.className = `status-dot ${devStatus}`;
+    // Update status pill (new layout)
+    const pill = card.querySelector('.device-status-pill');
+    if (pill) {
+      pill.classList.remove('online', 'warning', 'offline', 'unknown');
+      pill.classList.add(devStatus);
     }
 
-    const statusTextEl = card.querySelector('.status-text');
+    const statusTextEl = card.querySelector('.device-status-pill .status-text');
     if (statusTextEl) {
-      statusTextEl.className = `status-text ${devStatus}`;
       statusTextEl.textContent = devStatus;
     }
   }
@@ -1159,6 +1236,48 @@ function openDeviceDetail(deviceId) {
     };
     document.addEventListener('keydown', state.detailEscapeHandler);
   }
+}
+
+/**
+ * Open Device Logs panel (can be same as detail but focused on logs)
+ * For now, opens detail panel and switches to logs tab
+ */
+function openDeviceLogs(deviceId) {
+  const dev = state.devices.find(d => d.id === deviceId);
+  if (!dev) return;
+  
+  // Open detail panel first
+  openDeviceDetail(deviceId);
+  
+  // Switch to logs tab after a brief delay to ensure DOM is ready
+  setTimeout(() => {
+    const logsTab = document.querySelector('[data-tab="logs"]') || document.querySelector('[data-tab="events"]');
+    if (logsTab) logsTab.click();
+    
+    // Also scroll to logs section
+    const logsSection = document.getElementById('detail-log-list') || document.getElementById('detail-events-list');
+    if (logsSection) logsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 150);
+}
+
+/**
+ * Open Device Incidents panel (focused on threat timeline/incidents)
+ */
+function openDeviceIncidents(deviceId) {
+  const dev = state.devices.find(d => d.id === deviceId);
+  if (!dev) return;
+  
+  // Open detail panel first
+  openDeviceDetail(deviceId);
+  
+  // Switch to incidents/threat tab
+  setTimeout(() => {
+    const threatTab = document.querySelector('[data-tab="threat"]') || document.querySelector('[data-tab="incidents"]');
+    if (threatTab) threatTab.click();
+    
+    const threatSection = document.getElementById('threat-timeline-container') || document.getElementById('detail-events-list');
+    if (threatSection) threatSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 150);
 }
 
 function toggleSection(contentId, iconId) {
@@ -1415,15 +1534,19 @@ function renderSystemResources(sys) {
   if (sys.temperature_c && sys.temperature_c.supported && sys.temperature_c.value != null) {
     const v = parseFloat(sys.temperature_c.value);
     rows.push(sysRowBar('Temperature', `${isFinite(v) ? v.toFixed(1) : '--'}°C`, (v - 30) / 40 * 100, sys.temperature_c.source));
-  } else {
-    rows.push(sysRowStatus('Temperature', sys.temperature_c && sys.temperature_c.reason));
   }
 
   if (sys.battery && sys.battery.supported) {
     const charge = sys.battery.charge_pct != null ? `${Number(sys.battery.charge_pct).toFixed(0)}%` : 'ok';
     rows.push(sysRowBar('Battery/UPS', charge, Number(sys.battery.charge_pct) || null, sys.battery.source));
-  } else {
-    rows.push(sysRowStatus('Battery / UPS', sys.battery && sys.battery.reason));
+  }
+
+  // Kalau suhu & baterai sama-sama tidak didukung perangkat, tampilkan satu
+  // baris catatan ringkas (bukan dua baris alasan panjang yang memakan ruang).
+  const tempUnsupported = !(sys.temperature_c && sys.temperature_c.supported);
+  const battUnsupported = !(sys.battery && sys.battery.supported);
+  if (tempUnsupported && battUnsupported) {
+    rows.push('<div class="dic-sys-row"><span class="dic-sys-label">Sensors</span><span class="dic-sys-value dic-sys-sub">Suhu &amp; baterai/UPS tidak dilaporkan perangkat ini (HOST-RESOURCES)</span></div>');
   }
 
   list.innerHTML = rows.length > 0
@@ -1838,7 +1961,11 @@ function threatIncidentHtml(inc) {
   const expanded = threatState.expanded.has(key);
   const start = inc.startedAt ? new Date(inc.startedAt).toLocaleString('id-ID', { hour12: false }) : '--';
   const last = inc.lastEventAt ? new Date(inc.lastEventAt).toLocaleString('id-ID', { hour12: false }) : '--';
-  const rules = (inc.matchedRules || []).map(r => escapeHtml(String(r))).join(', ');
+  // Defensif: nilai dari DB bisa string/CSV/jarang non-array — hindari .map crash.
+  const rawRules = inc.matchedRules;
+  const rulesList = Array.isArray(rawRules) ? rawRules
+    : (rawRules != null && String(rawRules).trim() !== '' ? String(rawRules).split(',') : []);
+  const rules = rulesList.map(r => escapeHtml(String(r))).join(', ');
   const events = inc.events || [];
   const ackBtn = inc.status === 'open'
     ? `<button type="button" class="dic-threat-ack" data-ack="${escapeHtml(key)}">Acknowledge</button>`
@@ -2018,7 +2145,10 @@ async function loadDeviceHistory(deviceId) {
     // History = PAST incidents only. The active incident is shown by the
     // Root Cause + Timeline cards above — do not duplicate it in the list.
     const deviceHistory = (res.history || []).filter(i => i.deviceId == deviceId);
-    const allHistory = deviceHistory.slice(0, 10);
+    // Insiden yang diarsipkan (maintenance) tetap terlihat di history,
+    // ditandai badge khusus.
+    const deviceArchived = (res.archived || []).filter(i => i.deviceId == deviceId);
+    const allHistory = [...deviceHistory, ...deviceArchived].slice(0, 10);
 
     if (countEl) countEl.textContent = `${allHistory.length} incident${allHistory.length !== 1 ? 's' : ''}`;
 
@@ -2743,16 +2873,23 @@ function renderIncidentFeed(searchQuery = '', sevFilter = 'all') {
   if (!container) return;
   container.innerHTML = '';
 
+  const archivedMode = state.incidentFeedMode === 'archived';
+  const sourceList = archivedMode ? (state.archivedIncidents || []) : state.activeIncidents;
   const q = searchQuery.toLowerCase();
-  const filtered = state.activeIncidents.filter(inc => {
+  const filtered = sourceList.filter(inc => {
     const matchSev = sevFilter === 'all' || inc.currentSeverity === sevFilter;
     const matchSearch = !q || (inc.deviceName || '').toLowerCase().includes(q) ||
                         (inc.incidentId || '').toLowerCase().includes(q);
     return matchSev && matchSearch;
   });
 
+  const archivedCountEl = document.getElementById('panel-archived-count');
+  if (archivedCountEl) archivedCountEl.textContent = String((state.archivedIncidents || []).length);
+
   if (filtered.length === 0) {
-    container.innerHTML = '<div style="text-align:center; padding:24px 12px; color:var(--text-muted); font-size:0.78rem;">No incidents match your filter</div>';
+    container.innerHTML = archivedMode
+      ? '<div style="text-align:center; padding:24px 12px; color:var(--text-muted); font-size:0.78rem;">Tidak ada insiden diarsipkan. Device maintenance yang nadanya di-senyap akan tampil di sini.</div>'
+      : '<div style="text-align:center; padding:24px 12px; color:var(--text-muted); font-size:0.78rem;">No incidents match your filter</div>';
     return;
   }
 
@@ -2767,31 +2904,109 @@ function renderIncidentFeed(searchQuery = '', sevFilter = 'all') {
 
     const title = incident.rootCause?.message || `Incident ${incident.incidentId}`;
     const deviceName = incident.deviceName || 'Unknown Device';
+    const archivedTag = archivedMode
+      ? `<button type="button" class="btn-arch-toggle" data-unarchive-id="${escapeHtml(incident.incidentId)}" title="Kembalikan ke live feed (maintenance selesai)">↩ Pulihkan</button>`
+      : `<button type="button" class="btn-arch-toggle" data-archive-id="${escapeHtml(incident.incidentId)}" title="Arsipkan — device sedang maintenance, notifikasi disembunyikan dari feed">📁 Arsip</button>`;
 
     item.innerHTML = `
       <div class="stream-icon ${iconType}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>
       </div>
       <div class="stream-body">
-        <div class="stream-event-title">${title}</div>
+        <div class="stream-event-title">${title}${archivedMode ? '<span class="stream-archived-badge">DIARSIPKAN</span>' : ''}</div>
         <div class="stream-event-target">${deviceName}</div>
-        <div class="stream-time-tag">${timeAgo}</div>
+        <div class="stream-time-tag">${timeAgo}${incident.archivedNote ? ' · ' + escapeHtml(incident.archivedNote) : ''}</div>
+        ${archivedTag}
       </div>
     `;
 
-    item.addEventListener('click', () => {
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.btn-arch-toggle')) return;
       openIncidentDrawerById(incident.incidentId);
     });
 
     container.appendChild(item);
   });
 
-  const activeCount = state.activeIncidents.length;
-  const panelCountEl = document.getElementById('panel-incidents-count');
-  const navBadgeEl = document.getElementById('nav-alert-counter');
-  if (panelCountEl) panelCountEl.textContent = activeCount;
-  if (navBadgeEl) navBadgeEl.textContent = activeCount;
+  const archiveBtns = container.querySelectorAll('[data-archive-id]');
+  archiveBtns.forEach(btn => {
+    btn.addEventListener('click', () => archiveIncidentFE(btn.dataset.archiveId, btn));
+  });
+  const unarchiveBtns = container.querySelectorAll('[data-unarchive-id]');
+  unarchiveBtns.forEach(btn => {
+    btn.addEventListener('click', () => unarchiveIncidentFE(btn.dataset.unarchiveId, btn));
+  });
+
+  if (!archivedMode) {
+    const activeCount = state.activeIncidents.length;
+    const panelCountEl = document.getElementById('panel-incidents-count');
+    const navBadgeEl = document.getElementById('nav-alert-counter');
+    if (panelCountEl) panelCountEl.textContent = activeCount;
+    if (navBadgeEl) navBadgeEl.textContent = activeCount;
+  }
 }
+
+/**
+ * Arsipkan insiden (mode maintenance). Notifikasi insiden device yang sedang
+ * di-takedown hilang dari live feed & badge, tanpa harus menutup insiden.
+ */
+async function archiveIncidentFE(incidentId, btn) {
+  if (!incidentId) return;
+  const orig = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Mengarsipkan…'; }
+  const note = prompt('Catatan arsip (opsional, mis. "maintenance jam 9-11"):', '') ;
+  if (note === null) {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '📁 Arsip'; }
+    return;
+  }
+  try {
+    const ok = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/archive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: note || null })
+    }).then(r => r.json());
+    if (!ok.success) throw new Error(ok.error || 'gagal');
+    await refreshIncidents();
+  } catch (e) {
+    alert('Archive gagal: ' + (e.message || 'error'));
+    if (btn) { btn.disabled = false; btn.textContent = orig || '📁 Arsip'; }
+  }
+}
+
+async function unarchiveIncidentFE(incidentId, btn) {
+  if (!incidentId) return;
+  const orig = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Memulihkan…'; }
+  try {
+    const ok = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/unarchive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    }).then(r => r.json());
+    if (!ok.success) throw new Error(ok.error || 'gagal');
+    await refreshIncidents();
+  } catch (e) {
+    alert('Unarchive gagal: ' + (e.message || 'error'));
+    if (btn) { btn.disabled = false; btn.textContent = orig || '↩ Pulihkan'; }
+  }
+}
+
+/** Re-fetch daftar insiden (aktif + arsip) lalu render ulang feed/badge. */
+async function refreshIncidents() {
+  try {
+    const res = await fetch('/api/incidents').then(r => r.json());
+    if (res && res.success) {
+      state.activeIncidents = res.active || [];
+      state.incidentHistory = res.history || [];
+      state.archivedIncidents = res.archived || [];
+    }
+  } catch (e) { /* pakai data lama */ }
+  renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
+  updateIncidentBadge();
+}
+
+window.archiveIncidentFE = archiveIncidentFE;
+window.unarchiveIncidentFE = unarchiveIncidentFE;
 
 function updateIncidentBadge() {
   const activeCount = state.activeIncidents.length;
@@ -3163,6 +3378,17 @@ function setupEventListeners() {
     });
   }
 
+  // Mode Live / Arsip (Incident Feeds panel — device maintenance).
+  state.incidentFeedMode = 'active';
+  document.querySelectorAll('#incidents-mode-filter .sev-mode').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#incidents-mode-filter .sev-mode').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.incidentFeedMode = btn.dataset.feedMode || 'active';
+      renderIncidentFeed(state.incidentSearch, state.incidentSevFilter);
+    });
+  });
+
   // Severity Filter in Panel
   document.querySelectorAll('.sev-filter').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -3470,7 +3696,10 @@ function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
   const tbody = document.getElementById('alerts-page-tbody');
   if (!tbody) return;
 
-  const allIncidents = [...state.activeIncidents, ...state.incidentHistory];
+  const archivedMode = state.alertsPageMode === 'archived';
+  const allIncidents = archivedMode
+    ? (state.archivedIncidents || [])
+    : [...state.activeIncidents, ...state.incidentHistory];
   const q = searchQuery.toLowerCase();
   const filtered = allIncidents.filter(a => {
     const matchSev = sevFilter === 'all' || a.currentSeverity === sevFilter;
@@ -3479,7 +3708,10 @@ function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
   });
 
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="7" class="alerts-empty">No incidents match your filter</td></tr>`;
+    const hint = archivedMode
+      ? '<tr><td colspan="7" class="alerts-empty">Tidak ada insiden diarsipkan. Arsipkan insiden device yang sedang maintenance agar notitasinya tidak mengganggu.</td></tr>'
+      : `<tr><td colspan="7" class="alerts-empty">No incidents match your filter</td></tr>`;
+    tbody.innerHTML = hint;
     return;
   }
 
@@ -3491,9 +3723,14 @@ function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
       : getDuration(startTime);
     const status = a.status || 'active';
     const statusClass = status === 'resolved' ? 'resolved' : 'active';
+    const idAttr = escapeHtml(String(a.incidentId));
+
+    const actionBtn = archivedMode
+      ? `<button class="btn-ack" onclick="unarchiveIncidentFE('${idAttr}', this)">↩ Pulihkan</button>`
+      : `<button class="btn-ack" onclick="archiveIncidentFE('${idAttr}', this)">📁 Arsip</button>`;
 
     return `
-      <tr data-incident-id="${a.incidentId}" style="cursor:pointer;">
+      <tr data-incident-id="${idAttr}" style="cursor:pointer;">
         <td>
           <span class="alert-severity-badge ${sevClass}">
             <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;"></span>
@@ -3502,7 +3739,7 @@ function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
         </td>
         <td class="alert-title-cell">
           ${a.rootCause?.message || 'Incident'}
-          <span>${a.deviceName || ''}</span>
+          <span>${a.deviceName || ''}${archivedMode ? ' · <b>DIARSIPKAN</b>' : ''}</span>
         </td>
         <td class="alert-device-cell">${a.deviceName || '--'}</td>
         <td class="alert-time-cell">${startTime.toLocaleString('id-ID', { hour12: false })}</td>
@@ -3511,16 +3748,15 @@ function renderAlertsPageTable(searchQuery = '', sevFilter = 'all') {
           <span class="alert-status-pill ${statusClass}">${status}</span>
         </td>
         <td class="alert-actions-cell">
-          <button class="btn-ack" disabled>
-            --
-          </button>
+          ${actionBtn}
         </td>
       </tr>
     `;
   }).join('');
 
   tbody.querySelectorAll('tr[data-incident-id]').forEach(row => {
-    row.addEventListener('click', () => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.btn-ack')) return;
       const id = row.dataset.incidentId;
       if (id) openIncidentDrawerById(id);
     });
@@ -3649,6 +3885,10 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
           <input type="text" id="alerts-page-search-input" placeholder="Search incidents...">
         </div>
+        <div class="alerts-page-mode btn-filter-group" id="alerts-page-mode-filter">
+          <button class="btn-filter active" data-page-mode="live">Live</button>
+          <button class="btn-filter" data-page-mode="archived">Diarsipkan</button>
+        </div>
         <div class="alerts-page-filter btn-filter-group">
           <button class="btn-filter active" data-alerts-sev="all">All</button>
           <button class="btn-filter" data-alerts-sev="critical">Critical</button>
@@ -3675,17 +3915,23 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
       </div>
     `;
 
-    // Wire search and severity filter
+    // Wire search, mode (Live/Diarsipkan) and severity filter
     setTimeout(() => {
       const searchInput = document.getElementById('alerts-page-search-input');
-      if (searchInput) {
-        searchInput.addEventListener('input', () => renderAlertsPageTable(searchInput.value, document.querySelector('.alerts-page-filter .active')?.dataset.alertsSev || 'all'));
-      }
+      searchInput.addEventListener('input', () => renderAlertsPageTable(searchInput.value, document.querySelector('.alerts-page-filter .active')?.dataset.alertsSev || 'all'));
       document.querySelectorAll('.alerts-page-filter .btn-filter').forEach(btn => {
         btn.addEventListener('click', () => {
           document.querySelectorAll('.alerts-page-filter .btn-filter').forEach(b => b.classList.remove('active'));
           btn.classList.add('active');
           renderAlertsPageTable(searchInput?.value || '', btn.dataset.alertsSev);
+        });
+      });
+      document.querySelectorAll('#alerts-page-mode-filter .btn-filter').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('#alerts-page-mode-filter .btn-filter').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          state.alertsPageMode = btn.dataset.pageMode || 'live';
+          renderAlertsPageTable(searchInput?.value || '', document.querySelector('.alerts-page-filter .active')?.dataset.alertsSev || 'all');
         });
       });
       renderAlertsPageTable('', 'all');
@@ -4576,6 +4822,33 @@ function renderReadinessData(container, data) {
 }
 
 /**
+ * Perintah "kirim log uji" beda per platform — harus mengikuti device_type,
+ * bukan selalu RouterOS (`/log warning` tidak ada di Linux dsb.).
+ */
+function syslogTestCommand(device) {
+  const t = deviceTypeKey(device && device.device_type);
+  if (t === 'router') {
+    return '/log warning "BMS-TEST"';
+  }
+  if (['server', 'vm', 'hypervisor', 'container_host', 'nas', 'san', 'backup', 'cctv', 'nvr'].indexOf(t) !== -1) {
+    // Perangkat berbasis Linux/Debian (umumnya) — logger dari bsdutils.
+    return 'logger -p user.warning "BMS-TEST"';
+  }
+  if (t === 'switch') {
+    // Masuk-keluar config mode menghasilkan %SYS-5-CONFIG_I (info level).
+    return 'conf t → end   (log %SYS-5-CONFIG_I terkirim otomatis)';
+  }
+  if (t === 'firewall') {
+    return 'diagnose log test   (FortiGate)';
+  }
+  if (t === 'access_point' || t === 'bridge' || t === 'wireless_bridge') {
+    return 'Ubah config atau reboot — menghasilkan system log';
+  }
+  // gateway & tipe lain: tunjukkan dua varian umum.
+  return 'RouterOS: /log warning "BMS-TEST"  •  Linux: logger -p user.warning "BMS-TEST"';
+}
+
+/**
  * Verifikasi AKTIF syslog: catat cursor log terbaru, minta user menjalankan
  * `/log warning "BMS-TEST"` di perangkat, lalu tunggu log BARU masuk.
  * Ini satu-satunya cara pasti membedakan "dikonfigurasi tapi idle" dari
@@ -4599,7 +4872,10 @@ async function verifySyslog(deviceId, btnEl) {
 
     info = document.createElement('div');
     info.className = 'readiness-verify-info';
-    info.innerHTML = 'Jalankan di perangkat:<br><code>/log warning "BMS-TEST"</code><br><small>Menunggu log masuk… (maks 45s)</small>';
+    // Perintah uji mengikuti tipe perangkat (device_type) yang dipilih.
+    const dev = (state.devices || []).find(d => d.id === deviceId);
+    const testCmd = syslogTestCommand(dev);
+    info.innerHTML = 'Jalankan di perangkat:<br><code>' + escapeHtml(testCmd) + '</code><br><small>Menunggu log masuk… (maks 45s)</small>';
     if (card) card.appendChild(info);
     setBtn('Menunggu…', true);
     const v = await fetch(`/api/devices/${deviceId}/syslog-verify?sinceId=${cursorId}&timeout=45000`).then(r => r.json());
@@ -4727,20 +5003,49 @@ function renderTopologyGraph(data) {
     };
   });
 
+  // Build node status map for edge color computation
+  const nodeStatusMap = new Map();
+  data.nodes.forEach(n => {
+    nodeStatusMap.set(n.id, n.status || 'unknown');
+  });
+
   const visEdges = data.edges.map(e => {
     const stale = e.stale === true;
-    const baseColor = e.color || '#475569';
+    const fromStatus = nodeStatusMap.get(e.from) || 'unknown';
+    const toStatus = nodeStatusMap.get(e.to) || 'unknown';
+    
+    // Compute edge color based on connected node statuses
+    let edgeColor, edgeHighlight, edgeWidth = 1.5;
+    if (stale) {
+      edgeColor = '#ef4444'; // Red for stale
+      edgeHighlight = '#ef4444';
+      edgeWidth = 2;
+    } else if (fromStatus === 'offline' || toStatus === 'offline') {
+      edgeColor = '#ef4444'; // Red if either node offline
+      edgeHighlight = '#f87171';
+      edgeWidth = 2;
+    } else if (fromStatus === 'online' && toStatus === 'online') {
+      edgeColor = '#10b981'; // Green if both online
+      edgeHighlight = '#34d399';
+    } else if (fromStatus === 'warning' || toStatus === 'warning') {
+      edgeColor = '#f59e0b'; // Amber if warning
+      edgeHighlight = '#fbbf24';
+    } else {
+      edgeColor = '#475569'; // Default slate
+      edgeHighlight = '#2596BE';
+    }
+
     return {
       id: e.id,
       from: e.from,
       to: e.to,
       color: {
-        color: stale ? '#ef4444' : baseColor,
-        highlight: stale ? '#ef4444' : '#2596BE'
+        color: edgeColor,
+        highlight: edgeHighlight
       },
       dashes: stale ? [6, 4] : (e.dashes || false),
       arrows: { to: { enabled: true, scaleFactor: 0.4 } },
-      width: stale ? 2 : 1.5,
+      width: edgeWidth,
       smooth: { enabled: true, type: 'curvedCW', roundness: 0.15 },
       font: { color: '#94a3b8', size: 9, strokeWidth: 0, align: 'middle' },
       title: `${stale ? '⚠ TERPUTUS\n' : ''}${e.protocol ? e.protocol.toUpperCase() : 'Link'}`
@@ -4748,6 +5053,7 @@ function renderTopologyGraph(data) {
         + `${e.target_port_desc || e.target_interface ? `\nPort: ${e.target_port_desc || e.target_interface}` : ''}`
         + `${e.target_ip ? `\nIP: ${e.target_ip}` : ''}`
         + `${stale && e.last_seen ? `\nTerakhir terlihat: ${formatTimeAgo(new Date(e.last_seen))}` : ''}`
+        + `\nSource: ${fromStatus.toUpperCase()} | Target: ${toStatus.toUpperCase()}`
     };
   });
 

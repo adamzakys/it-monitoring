@@ -17,20 +17,7 @@
  */
 
 const { spawn } = require('child_process');
-
-// Phase 1: strict target validator. Mirrors the one in routes/api.js.
-// OIDs are validated by being internal constants (see OID table below).
-const RE_IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$/;
-const RE_IPV6 = /^(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}$|^(?:[0-9A-Fa-f]{1,4}:){1,7}:$|^::1?$|^(?:[0-9A-Fa-f]{1,4}:){1,6}(?:\d{1,3}\.){3}\d{1,3}$/;
-const RE_HOSTNAME = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?$/;
-const RE_COMMUNITY = /^[A-Za-z0-9_\-]{1,32}$/;
-function _isValidTarget(value) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 253) return false;
-  return RE_IPV4.test(value) || RE_IPV6.test(value) || RE_HOSTNAME.test(value);
-}
-function _isValidCommunity(value) {
-  return typeof value === 'string' && RE_COMMUNITY.test(value);
-}
+const { isValidTarget, isValidCommunity } = require('../utils/validators');
 
 let db = null;
 let discoveryTimer = null;
@@ -44,6 +31,14 @@ const OID = {
   lldpRemPortDesc: '.1.0.8802.1.1.2.1.4.1.1.8',    // LLDP-MIB::lldpRemPortDesc
   lldpRemSysName: '.1.0.8802.1.1.2.1.4.1.1.9',     // LLDP-MIB::lldpRemSysName
   lldpRemSysDesc: '.1.0.8802.1.1.2.1.4.1.1.10',    // LLDP-MIB::lldpRemSysDesc
+  lldpRemLocalPortNum: '.1.0.8802.1.1.2.1.4.1.1.4', // LLDP-MIB::lldpRemLocalPortNum (LOCAL port number)
+
+  // LLDP-MIB: lldpLocPortTable — LOCAL port mapping (for source_interface)
+  // Maps local port number to local interface name/description
+  lldpLocPortSubtree: '.1.0.8802.1.1.2.1.3.7',   // lldpLocPortTable subtree
+  lldpLocPortNum: '.1.0.8802.1.1.2.1.3.7.1.2',   // lldpLocPortNum (local port number)
+  lldpLocPortId: '.1.0.8802.1.1.2.1.3.7.1.3',    // lldpLocPortId (local interface name)
+  lldpLocPortDesc: '.1.0.8802.1.1.2.1.3.7.1.4',  // lldpLocPortDesc (local interface description)
 
   // LLDP-MIB: lldpRemManAddrTable — Management Address TLV.
   // Standard place where a neighbor advertises its IP. Previously never
@@ -77,13 +72,13 @@ function init(deps) {
  * SNMP walk wrapper — returns parsed output as array of { oid, value }
  * Phase 1: uses spawn() with arg array. The OID is restricted to internal
  * constants (validated by the OID constant table above) and the target
- * IP/hostname is validated by _isValidTarget() before invocation.
+ * IP/hostname is validated by isValidTarget() before invocation.
  */
 function snmpWalk(ip, oid, community = 'public', timeoutMs = 5000) {
   // Phase 1: defend against malformed or hostile input. OIDs are passed
   // by the caller — we trust only the constants in the OID table at the
   // top of this file (numeric only, single dot-separated integers).
-  if (!_isValidTarget(ip) || !_isValidCommunity(community)) {
+  if (!isValidTarget(ip) || !isValidCommunity(community)) {
     return Promise.resolve([]);
   }
   // OID must be a numeric string (e.g. ".1.3.6.1.4.1" or "1.3.6.1.4.1").
@@ -356,7 +351,7 @@ function decodeSnmpAddress(value) {
  */
 function parseLldpWalk(walkResults) {
   // OID pattern in lldpRemTable: ...1.4.1.1.<field>.<index>
-  // Field IDs (last digit of lldpRemEntry OID): 5=chassisId, 7=portId,
+  // Field IDs (last digit of lldpRemEntry OID): 4=localPortNum, 5=chassisId, 7=portId,
   // 8=portDesc, 9=sysName, 10=sysDesc
   const FIELD_PATTERN = '.1.4.1.1.';
   // lldpRemManAddrTable pattern: ...1.4.2.1.<field>.<time>.<port>.<remIndex>[.<subtype>.<addr>...]
@@ -375,6 +370,7 @@ function parseLldpWalk(walkResults) {
     if (firstDot < 0) continue;
     const fieldId = fieldSegment.substring(0, firstDot);
     switch (fieldId) {
+      case '4': byIndex[r.index].localPortNum = r.value; break;  // lldpRemLocalPortNum
       case '5': byIndex[r.index].chassisId = r.value; break;
       case '7': byIndex[r.index].portId = r.value; break;
       case '8': byIndex[r.index].portDesc = r.value; break;
@@ -423,6 +419,50 @@ function parseLldpWalk(walkResults) {
   }
 
   return Object.values(byIndex).filter(n => n.chassisId);
+}
+
+/**
+ * Parse LLDP local port table walk output.
+ * Returns Map<localPortNum, localInterfaceName>
+ * Used to map remote neighbor's lldpRemLocalPortNum to our local interface name.
+ */
+function parseLldpLocPortWalk(walkResults) {
+  // OID pattern in lldpLocPortTable: ...1.3.7.1.<field>.<index>
+  // Field IDs: 2=lldpLocPortNum, 3=lldpLocPortId, 4=lldpLocPortDesc
+  const FIELD_PATTERN = '.1.3.7.1.';
+  const byLocalPortNum = {};
+  
+  const normalizeOid = (oid) => (oid.startsWith('iso.') ? '.' + oid.substring(4) : oid);
+
+  for (const r of walkResults) {
+    let oid = normalizeOid(r.oid);
+    const idx = oid.lastIndexOf(FIELD_PATTERN);
+    if (idx < 0) continue;
+    const fieldSegment = oid.substring(idx + FIELD_PATTERN.length);
+    const firstDot = fieldSegment.indexOf('.');
+    if (firstDot < 0) continue;
+    const fieldId = fieldSegment.substring(0, firstDot);
+    const localPortNum = fieldSegment.substring(firstDot + 1);
+    
+    if (!byLocalPortNum[localPortNum]) byLocalPortNum[localPortNum] = { localPortNum };
+    
+    switch (fieldId) {
+      case '3': byLocalPortNum[localPortNum].localPortId = r.value; break;      // lldpLocPortId (interface name)
+      case '4': byLocalPortNum[localPortNum].localPortDesc = r.value; break;    // lldpLocPortDesc (description)
+    }
+  }
+
+  // Return Map for easy lookup: localPortNum -> localPortId (interface name)
+  const result = new Map();
+  for (const entry of Object.values(byLocalPortNum)) {
+    if (entry.localPortId) {
+      result.set(entry.localPortNum, entry.localPortId);
+    } else if (entry.localPortDesc) {
+      // Fallback to description if no ID
+      result.set(entry.localPortNum, entry.localPortDesc);
+    }
+  }
+  return result;
 }
 
 /**
@@ -716,7 +756,8 @@ async function runDiscovery() {
         OID.lldpRemPortId,
         OID.lldpRemPortDesc,
         OID.lldpRemSysName,
-        OID.lldpRemSysDesc
+        OID.lldpRemSysDesc,
+        OID.lldpRemLocalPortNum  // Local port number for source_interface mapping
       ]) {
         const r = await snmpWalk(device.ip_address, fieldOid, device.snmp_community || 'public');
         allLldpResults.push(...r);
@@ -726,6 +767,15 @@ async function runDiscovery() {
       const manAddrRows = await snmpWalk(device.ip_address, OID.lldpRemManAddrSubtree, device.snmp_community || 'public');
       allLldpResults.push(...manAddrRows);
 
+      // Walk local port table for source_interface mapping (localPortNum -> interface name)
+      let localPortMap = new Map();
+      try {
+        const locPortRows = await snmpWalk(device.ip_address, OID.lldpLocPortSubtree, device.snmp_community || 'public');
+        localPortMap = parseLldpLocPortWalk(locPortRows);
+      } catch (e) {
+        // Local port table not supported, will fall back to 'auto'
+      }
+
       const neighbors = parseLldpWalk(allLldpResults);
       for (const n of neighbors) {
         const matched = await matchNeighbor(device, allDevices, n, arpMap);
@@ -733,9 +783,15 @@ async function runDiscovery() {
         // Self-loop detection: targetDeviceId equals source device id
         if (matched.targetDeviceId && matched.targetDeviceId === device.id) continue;
 
+        // Map source_interface using localPortNum from remote table + local port table
+        let sourceInterface = 'auto';
+        if (n.localPortNum && localPortMap.has(n.localPortNum)) {
+          sourceInterface = localPortMap.get(n.localPortNum);
+        }
+
         const link = {
           source_device_id: device.id,
-          source_interface: 'auto', // LLDP doesn't easily map per-interface index
+          source_interface: sourceInterface,
           target_chassis_id: matched.targetChassisId,
           target_sys_name: matched.targetSysName,
           target_port_id: n.portId || null,

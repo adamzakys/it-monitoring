@@ -100,6 +100,22 @@ async function bootstrap() {
     console.warn('[Bootstrap] topologyDiscovery init error:', e.message);
   }
 
+  // 2c. Schedule periodic interface sync from InfluxDB (every 5 min)
+  try {
+    const { syncAllDeviceInterfaces } = require('./routes/api');
+    // Initial sync after 30s
+    setTimeout(() => {
+      syncAllDeviceInterfaces().catch(e => console.warn('[InterfaceSync] Initial sync error:', e.message));
+    }, 30000);
+    // Periodic sync every 5 minutes
+    setInterval(() => {
+      syncAllDeviceInterfaces().catch(e => console.warn('[InterfaceSync] Periodic sync error:', e.message));
+    }, 5 * 60 * 1000);
+    console.log('[Bootstrap] Interface sync scheduled every 5 minutes');
+  } catch (e) {
+    console.warn('[Bootstrap] interfaceSync init error:', e.message);
+  }
+
   // 3. Listen on PORT
   server.listen(PORT, () => {
     console.log(`

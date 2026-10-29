@@ -4,7 +4,7 @@ const { exec } = require('child_process');
 require('dotenv').config();
 
 const confDir = process.env.TELEGRAF_CONF_DIR || './telegraf.d';
-const reloadCmd = process.env.TELEGRAF_RELOAD_CMD || 'echo "Reloading Telegraf"';
+const reloadCmd = process.env.TELEGRAF_RELOAD_CMD || 'systemctl reload telegraf';
 
 // Ensure config directory exists and has InfluxDB v2 output configured
 function ensureConfDir() {
@@ -320,10 +320,11 @@ function removeDeviceConfig(deviceId) {
 
 /**
  * Executes Telegraf reload dengan urutan fallback:
- * 1) SIGHUP ke PID telegraf yang sedang running (graceful, tanpa putus koneksi)
+ * 1) Direct SIGHUP ke PID telegraf (jika same user, no sudo needed)
  * 2) `systemctl reload telegraf` (jika ada systemd unit)
  * 3) Custom command dari env TELEGRAF_RELOAD_CMD
- * 4) Fallback echo warning
+ * 4) SIGHUP via sudo (last resort, needs passwordless sudo)
+ * 5) Fallback echo warning
  */
 function triggerReload() {
   // 1. Cari PID Telegraf yang sedang running
@@ -336,15 +337,8 @@ function triggerReload() {
     telegrafPid = pids[pids.length - 1] || null;
   } catch (e) { /* pgrep not found or no match */ }
 
+  // 1. Try direct SIGHUP first (works if same user)
   if (telegrafPid) {
-    try {
-      execSync(`sudo kill -HUP ${telegrafPid}`, { encoding: 'utf8', timeout: 3000, stdio: 'pipe' });
-      console.log(`[TelegrafManager] SIGHUP sent to Telegraf PID ${telegrafPid} - config reloaded.`);
-      return;
-    } catch (e) {
-      console.warn(`[TelegrafManager] SIGHUP via sudo failed (${e.message?.split('\n')[0] || 'unknown'}). Trying next method...`);
-    }
-    // Coba tanpa sudo kalau user sudah يملك permission
     try {
       process.kill(telegrafPid, 'SIGHUP');
       console.log(`[TelegrafManager] SIGHUP sent to Telegraf PID ${telegrafPid} (direct).`);
@@ -354,18 +348,31 @@ function triggerReload() {
     }
   }
 
-  // 2. systemctl reload (legacy / systemd environments)
-  const reloadCmd = process.env.TELEGRAF_RELOAD_CMD || 'echo "Reloading Telegraf"';
+  // 2. systemctl reload (systemd environments)
+  const reloadCmd = process.env.TELEGRAF_RELOAD_CMD || 'systemctl reload telegraf';
+  const { exec } = require('child_process');
   exec(reloadCmd, (error, stdout, stderr) => {
     if (error) {
-      console.warn(`[TelegrafManager] Reload command notice: ${error.message}`);
+      console.warn(`[TelegrafManager] systemctl reload failed: ${error.message}. Trying sudo...`);
+      
+      // 3. Try sudo as last resort
+      if (telegrafPid) {
+        try {
+          execSync(`sudo kill -HUP ${telegrafPid}`, { encoding: 'utf8', timeout: 3000, stdio: 'pipe' });
+          console.log(`[TelegrafManager] SIGHUP sent to Telegraf PID ${telegrafPid} via sudo.`);
+          return;
+        } catch (e) {
+          console.warn(`[TelegrafManager] SIGHUP via sudo failed: ${e.message?.split('\n')[0] || 'unknown'}.`);
+        }
+      }
+      
       console.warn('[TelegrafManager] Auto-reload failed. To pick up new config, run:');
       console.warn('[TelegrafManager]   sudo kill -HUP ' + (telegrafPid || '<telegraf-pid>'));
       console.warn('[TelegrafManager] Or use the helper script:');
       console.warn('[TelegrafManager]   ./scripts/restart-telegraf.sh');
       return;
     }
-    console.log(`[TelegrafManager] Reload executed: ${stdout || 'OK'}`);
+    console.log(`[TelegrafManager] Reload executed via systemctl: ${stdout || 'OK'}`);
   });
 }
 

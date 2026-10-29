@@ -4,18 +4,32 @@ require('dotenv').config();
 let client = null;
 let queryApi = null;
 
-function getClient(overrideConfig = null) {
+/**
+ * Get InfluxDB client with optional force refresh (for token rotation)
+ * @param {Object} [overrideConfig] - Override config from Settings
+ * @param {boolean} [forceRefresh] - Force recreate client (e.g., after token change)
+ */
+function getClient(overrideConfig = null, forceRefresh = false) {
   const url = overrideConfig?.INFLUX_URL || process.env.INFLUX_URL || 'http://127.0.0.1:8086';
   const token = overrideConfig?.INFLUX_TOKEN || process.env.INFLUX_TOKEN || '';
   const org = overrideConfig?.INFLUX_ORG || process.env.INFLUX_ORG || 'itnetmon';
   const bucket = overrideConfig?.INFLUX_BUCKET || process.env.INFLUX_BUCKET || 'itnetmon_metrics';
 
-  if (!client || overrideConfig) {
+  if (!client || overrideConfig || forceRefresh) {
     client = new InfluxDB({ url, token, timeout: 2500 });
     queryApi = client.getQueryApi(org);
   }
 
   return { client, queryApi, url, token, org, bucket };
+}
+
+/**
+ * Force refresh the InfluxDB client (call after token/org/bucket change)
+ */
+function resetClient() {
+  client = null;
+  queryApi = null;
+  return getClient(null, true);
 }
 
 /**
@@ -134,36 +148,38 @@ async function getLiveTelemetry(deviceId, interfaceName) {
 
 /**
  * Fetches all unique interface names for a device in the last 24 hours
+ * @param {number|string} deviceId
+ * @param {string} [deviceIp] - Optional IP for fallback lookup
  */
-async function getDeviceInterfaces(deviceId) {
+async function getDeviceInterfaces(deviceId, deviceIp = null) {
   const { queryApi, bucket } = getClient();
   const devIdStr = String(deviceId);
-  const fluxQuery = `
-    from(bucket: "${bucket}")
-      |> range(start: -24h)
-      |> filter(fn: (r) => r["_measurement"] == "net_interface" and r["device_id"] == "${devIdStr}")
-      |> keep(columns: ["interface_name"])
-      |> group()
-      |> unique(column: "interface_name")
-  `;
 
-  const interfaces = [];
-  try {
-    await new Promise((resolve, reject) => {
-      queryApi.queryRows(fluxQuery, {
-        next: (row, tableMeta) => {
-          const o = tableMeta.toObject(row);
-          if (o.interface_name) {
-            interfaces.push(o.interface_name);
-          }
-        },
-        error: (err) => reject(err),
-        complete: () => resolve()
-      });
-    });
-  } catch (err) {
-    console.error(`[InfluxService] Error fetching interfaces for device ${deviceId}:`, err.message);
+  // Primary: by device_id
+  let interfaces = await queryInterfacesByTag('device_id', devIdStr, bucket, queryApi);
+
+  // Fallback: by device_ip (handles cases where device was deleted+recreated with new ID)
+  if (interfaces.length === 0 && deviceIp) {
+    interfaces = await queryInterfacesByTag('device_ip', deviceIp, bucket, queryApi);
+    if (interfaces.length > 0) {
+      console.log(`[InfluxService] Interfaces for device ${deviceId} not found by ID, found by IP ${deviceIp} (${interfaces.length} interfaces)`);
+    }
   }
+
+  // Last resort: real-time SNMP walk (for newly added devices not yet in InfluxDB)
+  if (interfaces.length === 0 && deviceIp) {
+    try {
+      const streamService = require('./streamService');
+      const realtime = await streamService.getRealTimeInterfaces({ ip_address: deviceIp });
+      if (realtime && realtime.length > 0) {
+        interfaces = realtime.map(i => i.interface_name);
+        console.log(`[InfluxService] Interfaces for device ${deviceId} not in InfluxDB, got ${interfaces.length} from real-time SNMP walk`);
+      }
+    } catch (e) {
+      // silent - don't break the flow
+    }
+  }
+
   return interfaces;
 }
 
@@ -636,43 +652,6 @@ async function getSystemMetrics(deviceId) {
     console.error('[InfluxService] getSystemMetrics error:', err.message);
   }
   return result;
-}
-
-/**
- * Fetches all unique interface names for a device in the last 24 hours
- * Lookup by device_id (primary) + fallback by device_ip (handles ID drift) +
- * real-time SNMP walk as last resort (for newly added devices not yet in InfluxDB)
- */
-async function getDeviceInterfaces(deviceId, deviceIp = null) {
-  const { queryApi, bucket } = getClient();
-  const devIdStr = String(deviceId);
-
-  // Primary: by device_id
-  let interfaces = await queryInterfacesByTag('device_id', devIdStr, bucket, queryApi);
-
-  // Fallback: by device_ip (handles cases where device was deleted+recreated with new ID)
-  if (interfaces.length === 0 && deviceIp) {
-    interfaces = await queryInterfacesByTag('device_ip', deviceIp, bucket, queryApi);
-    if (interfaces.length > 0) {
-      console.log(`[InfluxService] Interfaces for device ${deviceId} not found by ID, found by IP ${deviceIp} (${interfaces.length} interfaces)`);
-    }
-  }
-
-  // Last resort: real-time SNMP walk (for newly added devices not yet in InfluxDB)
-  if (interfaces.length === 0 && deviceIp) {
-    try {
-      const streamService = require('./streamService');
-      const realtime = await streamService.getRealTimeInterfaces({ ip_address: deviceIp });
-      if (realtime && realtime.length > 0) {
-        interfaces = realtime.map(i => i.interface_name);
-        console.log(`[InfluxService] Interfaces for device ${deviceId} not in InfluxDB, got ${interfaces.length} from real-time SNMP walk`);
-      }
-    } catch (e) {
-      // silent - don't break the flow
-    }
-  }
-
-  return interfaces;
 }
 
 async function queryInterfacesByTag(tagName, tagValue, bucket, queryApi) {

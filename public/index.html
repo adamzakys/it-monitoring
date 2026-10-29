@@ -8,9 +8,19 @@
   <meta name="application-name" content="BMS IT Monitoring">
   <link rel="icon" type="image/png" href="/images/Logo-Berlian-Manyar-Sejahtera.png">
   <link rel="stylesheet" href="/css/output.css">
-  <link rel="stylesheet" href="/css/style.css">
-  <!-- Chart.js for high-performance canvas rendering -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- Chart.js for high-performance canvas rendering — local first, CDN fallback -->
+  <script>
+    // Load Chart.js locally first, fallback to CDN
+    const script = document.createElement('script');
+    script.src = '/js/chart.umd.min.js';
+    script.onerror = function() {
+      console.warn('Local Chart.js failed, falling back to CDN...');
+      const fallback = document.createElement('script');
+      fallback.src = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+      document.head.appendChild(fallback);
+    };
+    document.head.appendChild(script);
+  </script>
 </head>
 <body>
 
@@ -237,6 +247,10 @@
           <div class="search-input-wrap" style="width:100%;">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input type="text" id="incident-search" class="search-input" placeholder="Search incidents...">
+          </div>
+          <div class="incidents-mode-group btn-filter-group" id="incidents-mode-filter">
+            <button class="sev-mode active" data-feed-mode="active">Live</button>
+            <button class="sev-mode" data-feed-mode="archived">Arsip <span class="panel-tab-badge" id="panel-archived-count">0</span></button>
           </div>
           <div class="severity-filter-group" id="severity-filter">
             <button class="sev-filter active" data-sev="all">All</button>
@@ -477,13 +491,14 @@
         <!-- MAIN GRID LAYOUT - 12 Column System -->
         <div class="dic-grid">
 
-          <!-- ROW 1: HEALTH SUMMARY + DEVICE OVERVIEW (side by side) -->
+          <!-- ROW 1 kolom kiri: HEALTH SUMMARY + INTERFACE SUMMARY (gabung) -->
           <div class="dic-card dic-health">
             <div class="dic-card-header">
               <div class="dic-card-title">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
                 <h3>Health Summary</h3>
               </div>
+              <span id="detail-health-interfaces-badge" class="dic-count-badge"></span>
             </div>
             <div class="dic-metrics-grid">
               <div class="dic-metric">
@@ -497,6 +512,29 @@
               <div class="dic-metric">
                 <span class="dic-metric-label">Packet Loss</span>
                 <span class="dic-metric-value" id="detail-health-loss">--</span>
+              </div>
+            </div>
+
+            <div class="dic-health-subsection">
+              <div class="dic-panel-title">Interface Summary
+                <span id="detail-iface-count" class="dic-count-badge">--</span>
+              </div>
+              <div class="dic-table-wrap">
+                <table class="dic-table">
+                  <thead>
+                    <tr>
+                      <th>Interface</th>
+                      <th>Status</th>
+                      <th>Speed</th>
+                      <th>RX Mbps</th>
+                      <th>TX Mbps</th>
+                      <th>Errors</th>
+                    </tr>
+                  </thead>
+                  <tbody id="detail-iface-tbody">
+                    <tr><td colspan="6" class="dic-empty-cell">Loading…</td></tr>
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
@@ -522,7 +560,7 @@
                 <span class="dic-info-value" id="detail-overview-model">--</span>
               </div>
               <div class="dic-info-row">
-                <span class="dic-info-label">RouterOS</span>
+                <span class="dic-info-label">Operating System</span>
                 <span class="dic-info-value" id="detail-overview-ros">--</span>
               </div>
               <div class="dic-info-row">
@@ -595,34 +633,6 @@
 
           <!-- Incident aktif (Root Cause + Timeline) digabung di kartu
                "Incidents & Activity" pada baris bawah — lihat ROW 6b. -->
-          <!-- ROW 5: INTERFACE SUMMARY (Full Width) -->
-          <div class="dic-card dic-interfaces">
-            <div class="dic-card-header">
-              <div class="dic-card-title">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
-                <h3>Interface Summary</h3>
-              </div>
-              <span id="detail-iface-count" class="dic-count-badge">--</span>
-            </div>
-            <div class="dic-table-wrap">
-              <table class="dic-table">
-                <thead>
-                  <tr>
-                    <th>Interface</th>
-                    <th>Status</th>
-                    <th>Speed</th>
-                    <th>RX Mbps</th>
-                    <th>TX Mbps</th>
-                    <th>Errors</th>
-                  </tr>
-                </thead>
-                <tbody id="detail-iface-tbody">
-                  <tr><td colspan="6" class="dic-empty-cell">Loading…</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
           <!-- ROW 6: SYSTEM RESOURCES (kiri) + DEVICE LOG (kanan) -->
           <div class="dic-card dic-resources">
             <div class="dic-card-header">

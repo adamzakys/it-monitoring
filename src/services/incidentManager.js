@@ -261,12 +261,20 @@ async function closeIncident(deviceId, eventType, metric) {
   incident.durationMs = new Date(incident.endedAt).getTime() - new Date(incident.startedAt).getTime();
   incident.evidence = createEvidence(metric, incident.evidence);
   addStatusHistoryEntry(incident, eventType, metric);
+  // Device pulih → maintenance selesai → arsip otomatis diangkat agar
+  // riwayat insiden kembali tampil normal di Audit Center.
+  const hadArchive = !!incident.archivedAt;
+  incident.archivedAt = null;
+  incident.archivedNote = null;
+  incident.archivedBy = null;
 
   memoryIncidents.delete(deviceId);
 
   try {
     await db.query(
-      `UPDATE incidents SET status = ?, ended_at = ?, duration_ms = ?, root_cause = ?, evidence = ?, status_history = ? WHERE incident_id = ?`,
+      `UPDATE incidents SET status = ?, ended_at = ?, duration_ms = ?, root_cause = ?, evidence = ?, status_history = ?,
+          archived_at = NULL, archived_note = NULL, archived_by = NULL
+        WHERE incident_id = ?`,
       [STATUS.RESOLVED, incident.endedAt, incident.durationMs, JSON.stringify(incident.rootCause), JSON.stringify(incident.evidence), JSON.stringify(incident.statusHistory), incident.incidentId]
     );
   } catch (err) {
@@ -314,21 +322,25 @@ function parseIncidentRow(row) {
     durationMs: row.duration_ms,
     rootCause: typeof row.root_cause === 'string' ? JSON.parse(row.root_cause) : row.root_cause,
     evidence: typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence,
-    statusHistory: typeof row.status_history === 'string' ? JSON.parse(row.status_history) : (row.status_history || [])
+    statusHistory: typeof row.status_history === 'string' ? JSON.parse(row.status_history) : (row.status_history || []),
+    archivedAt: row.archived_at || null,
+    archivedNote: row.archived_note || null,
+    archivedBy: row.archived_by || null
   };
 }
 
 async function getAllActiveIncidents() {
   const active = [];
   for (const inc of memoryIncidents.values()) {
-    if (inc.status === STATUS.ACTIVE) {
+    // Insiden yang diarsipkan (mode maintenance) tidak masuk live feed.
+    if (inc.status === STATUS.ACTIVE && !inc.archivedAt) {
       active.push(inc);
     }
   }
 
   try {
     const res = await db.query(
-      `SELECT * FROM incidents WHERE status = ? ORDER BY started_at DESC`,
+      `SELECT * FROM incidents WHERE status = ? AND archived_at IS NULL ORDER BY started_at DESC`,
       [STATUS.ACTIVE]
     );
     for (const row of res.rows) {
@@ -341,6 +353,77 @@ async function getAllActiveIncidents() {
   }
 
   return active;
+}
+
+async function getArchivedIncidents(limit = 100) {
+  try {
+    const res = await db.query(
+      `SELECT * FROM incidents WHERE archived_at IS NOT NULL
+        ORDER BY archived_at DESC, started_at DESC LIMIT ?`,
+      [Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500)]
+    );
+    return res.rows.map(parseIncidentRow);
+  } catch (err) {
+    console.error('[IncidentManager] Failed to get archived incidents:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Arsipkan insiden (mode maintenance): hidden dari live feed & nav badge,
+ * engine tetap melacak hingga device pulih. Auto-unarchive saat resolved.
+ */
+async function archiveIncident(incidentId, { note = null, by = null } = {}) {
+  if (!incidentId) return null;
+  const archivedAt = new Date().toISOString();
+  try {
+    const r = await db.query(
+      `UPDATE incidents SET archived_at = ?, archived_note = ?, archived_by = ?
+        WHERE incident_id = ? AND archived_at IS NULL`,
+      [archivedAt, note ? String(note).slice(0, 300) : null, by ? String(by).slice(0, 100) : null, incidentId]
+    );
+    if (!r || (r.rowCount !== undefined && r.rowCount === 0)) {
+      // Sudah diarsipkan atau tidak ada — ambil state terkini.
+      const cur = await db.query('SELECT * FROM incidents WHERE incident_id = ?', [incidentId]);
+      return (cur.rows[0] || null) ? parseIncidentRow(cur.rows[0]) : null;
+    }
+    // Sinkronkan mirror in-memory (device yang sama masih dilacak engine).
+    for (const [devId, inc] of memoryIncidents.entries()) {
+      if (inc.incidentId === incidentId) {
+        inc.archivedAt = archivedAt;
+        inc.archivedNote = note ? String(note).slice(0, 300) : null;
+        inc.archivedBy = by ? String(by).slice(0, 100) : null;
+      }
+    }
+    const cur = await db.query('SELECT * FROM incidents WHERE incident_id = ?', [incidentId]);
+    return cur.rows[0] ? parseIncidentRow(cur.rows[0]) : null;
+  } catch (err) {
+    console.error('[IncidentManager] Failed to archive incident:', err.message);
+    return null;
+  }
+}
+
+async function unarchiveIncident(incidentId) {
+  if (!incidentId) return null;
+  try {
+    await db.query(
+      `UPDATE incidents SET archived_at = NULL, archived_note = NULL, archived_by = NULL
+        WHERE incident_id = ? AND archived_at IS NOT NULL`,
+      [incidentId]
+    );
+    for (const [, inc] of memoryIncidents.entries()) {
+      if (inc.incidentId === incidentId) {
+        inc.archivedAt = null;
+        inc.archivedNote = null;
+        inc.archivedBy = null;
+      }
+    }
+    const cur = await db.query('SELECT * FROM incidents WHERE incident_id = ?', [incidentId]);
+    return cur.rows[0] ? parseIncidentRow(cur.rows[0]) : null;
+  } catch (err) {
+    console.error('[IncidentManager] Failed to unarchive incident:', err.message);
+    return null;
+  }
 }
 
 async function getIncidentHistory(limit = 100) {
@@ -370,5 +453,8 @@ module.exports = {
   getActiveIncidentForDevice,
   getAllActiveIncidents,
   getIncidentHistory,
+  getArchivedIncidents,
+  archiveIncident,
+  unarchiveIncident,
   clearIncidentForDevice
 };
