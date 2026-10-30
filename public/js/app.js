@@ -20,6 +20,8 @@ const state = {
   archivedIncidents: [],
   incidentFeedMode: 'active',
   alertsPageMode: 'live',
+  reportsRange: 30,
+  reportsSlaData: null,
   ws: null,
   charts: {
     traffic: null,
@@ -628,8 +630,49 @@ function updateKpis(kpi) {
     uptimeEl.style.color = pct >= 99 ? 'var(--color-online)' : (pct >= 95 ? 'var(--color-warning)' : 'var(--color-offline)');
   }
 
-  // Render sparkline riil dari trendline API
-  renderSparkline(kpi.trendline || []);
+  // Render strip 30 bar riil dari daily_breakdown (B6);
+  // fallback ke sparkline lama bila breakdown tidak tersedia.
+  if (!renderUptimeBars(kpi.daily_breakdown || [])) {
+    renderSparkline(kpi.trendline || []);
+  }
+}
+
+/**
+ * B6: Render strip 30 bar harian utk widget 30-Day SLA Uptime di header.
+ * breakdown = [{ date:'YYYY-MM-DD', pct:number|null, total_checks, successful_checks }]
+ * pct null = hari tanpa sampel → bar abu-abu transparan (bukan hijau/merah palsu).
+ * Setiap bar punya tooltip tanggal + persentase + jumlah sampel.
+ */
+function renderUptimeBars(breakdown) {
+  const svg = document.getElementById('sparkline-container');
+  if (!svg || !Array.isArray(breakdown) || breakdown.length === 0) return false;
+
+  const n = breakdown.length;
+  const barW = 4, gap = 1;
+  const width = n * (barW + gap), height = 28;
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+
+  const parts = breakdown.map((d, i) => {
+    const x = i * (barW + gap);
+    let color = 'var(--text-muted)';
+    let opacity = '0.35';
+    let y = height - 6, h = 6;
+    if (d.pct !== null) {
+      color = d.pct >= 99.5 ? '#10b981' : (d.pct >= 95 ? '#f59e0b' : '#ef4444');
+      opacity = '1';
+      h = 8 + (d.pct / 100) * (height - 8); // tinggi bar proporsional uptime
+      y = height - h;
+    }
+    const dt = new Date(d.date + 'T00:00:00');
+    const dateLabel = dt.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+    const titleText = d.pct === null
+      ? `${dateLabel} — no data`
+      : `${dateLabel} — ${d.pct}% uptime (${d.successful_checks}/${d.total_checks} checks)`;
+    return `<rect x="${x}" y="${y.toFixed(2)}" width="${barW}" height="${h.toFixed(2)}" fill="${color}" opacity="${opacity}" rx="1"><title>${titleText}</title></rect>`;
+  }).join('');
+
+  svg.innerHTML = parts;
+  return true;
 }
 
 /**
@@ -3937,42 +3980,90 @@ function renderSecondaryView(view, container, titleEl, subtitleEl) {
       renderAlertsPageTable('', 'all');
     }, 0);
   } else if (view === 'reports') {
-    titleEl.textContent = 'Performance & Availability Reports';
-    subtitleEl.textContent = 'Monthly SLA metrics, availability scores, and exportable traffic summaries';
+    titleEl.textContent = 'SLA & Availability Report';
+    subtitleEl.textContent = 'Uptime harian, breakdown riil dari probe Telegraf/InfluxDB, ringkasan insiden, dan ekspor CSV';
     container.innerHTML = `
-      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:24px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:12px;">
-          <div>
-            <h3 style="font-family:var(--font-display);">30-Day SLA Availability: <span id="reports-sla-text" style="color:var(--color-online);">--</span></h3>
-            <p style="font-size:0.8rem; color:var(--text-muted);" id="reports-source">Aggregated from PostgreSQL daily_uptime table</p>
-          </div>
-          <button class="btn-action" onclick="exportSlaCsv()">Export CSV Report</button>
+      <div class="alerts-page-toolbar">
+        <div id="reports-range-filter" class="btn-filter-group" style="margin-left:0;">
+          <button class="btn-filter" data-range="7">7 hari</button>
+          <button class="btn-filter" data-range="14">14 hari</button>
+          <button class="btn-filter active" data-range="30">30 hari</button>
         </div>
-        <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:16px;">
-          <div style="background:var(--bg-surface-elevated); padding:16px; border-radius:var(--radius-sm);">
-            <div style="font-size:0.75rem; color:var(--text-muted);">Total Ingestion Points (24h)</div>
-            <div style="font-size:1.4rem; font-weight:700; font-family:var(--font-display); color:var(--color-brand); margin-top:4px;" id="reports-ingestion">--</div>
-            <div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;" id="reports-ingestion-src">loading…</div>
-          </div>
-          <div style="background:var(--bg-surface-elevated); padding:16px; border-radius:var(--radius-sm);">
-            <div style="font-size:0.75rem; color:var(--text-muted);">Average Latency Across Pool</div>
-            <div style="font-size:1.4rem; font-weight:700; font-family:var(--font-display); color:var(--color-online); margin-top:4px;" id="reports-avg-latency">--</div>
-            <div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;" id="reports-latency-src">loading…</div>
-          </div>
-          <div style="background:var(--bg-surface-elevated); padding:16px; border-radius:var(--radius-sm);">
-            <div style="font-size:0.75rem; color:var(--text-muted);">Cumulative Packet Loss</div>
-            <div style="font-size:1.4rem; font-weight:700; font-family:var(--font-display); color:var(--color-warning); margin-top:4px;" id="reports-avg-loss">--</div>
-            <div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;" id="reports-loss-src">loading…</div>
-          </div>
-        </div>
+        <div style="flex:1;"></div>
+        <button class="btn-action" onclick="exportSlaCsv()">Export CSV</button>
+      </div>
 
-        <h4 style="font-family:var(--font-display); margin:24px 0 12px;">Daily Uptime Breakdown (30 Days)</h4>
-        <div id="reports-daily-table" style="max-height:340px; overflow-y:auto; border:1px solid var(--border-subtle); border-radius:var(--radius-sm);">
+      <div class="kpi-grid" style="margin-bottom:16px;">
+        <div class="kpi-card total">
+          <div class="kpi-info">
+            <span class="kpi-label" id="reports-uptime-label">Avg Uptime (30d)</span>
+            <span class="kpi-number" id="reports-sla-text">--</span>
+            <span style="font-size:0.65rem; color:var(--text-muted);" id="reports-source">loading…</span>
+          </div>
+        </div>
+        <div class="kpi-card online">
+          <div class="kpi-info">
+            <span class="kpi-label">Hari Dengan Data</span>
+            <span class="kpi-number" id="reports-data-days">--</span>
+            <span style="font-size:0.65rem; color:var(--text-muted);" id="reports-data-days-src">loading…</span>
+          </div>
+        </div>
+        <div class="kpi-card warning">
+          <div class="kpi-info">
+            <span class="kpi-label" id="reports-total-checks-label">Total Checks (30d)</span>
+            <span class="kpi-number" id="reports-total-checks">--</span>
+            <span style="font-size:0.65rem; color:var(--text-muted);" id="reports-ingestion-src">ingestion 24h: --</span>
+          </div>
+        </div>
+        <div class="kpi-card offline">
+          <div class="kpi-info">
+            <span class="kpi-label" id="reports-failed-label">Failed Checks (30d)</span>
+            <span class="kpi-number" id="reports-failed-checks">--</span>
+            <span style="font-size:0.65rem; color:var(--text-muted);">lat 24h: <span id="reports-avg-latency-src-inline">--</span> · loss 24h: <span id="reports-avg-loss-src-inline">--</span></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="dic-card" style="padding:16px; margin-bottom:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px;">
+          <h4 style="font-family:var(--font-display); font-size:0.9rem;">Daily Uptime Chart</h4>
+          <span style="font-size:0.65rem; color:var(--text-muted);">
+            <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#10b981;margin-right:3px;"></span>≥99.5
+            <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#f59e0b;margin-left:8px;margin-right:3px;"></span>95-99
+            <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#ef4444;margin-left:8px;margin-right:3px;"></span>&lt;95
+            <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#94a3b855;margin-left:8px;margin-right:3px;"></span>no data
+          </span>
+        </div>
+        <div style="height:300px; position:relative;">
+          <canvas id="reports-sla-chart"></canvas>
+        </div>
+      </div>
+
+      <div class="alerts-table-wrap" style="margin-bottom:16px; padding:16px;">
+        <h4 style="font-family:var(--font-display); font-size:0.9rem; margin-bottom:10px;">Insiden Dalam Rentang <span id="reports-inc-days" style="color:var(--text-muted); font-size:0.7rem;"></span></h4>
+        <div id="reports-incidents" style="font-size:0.8rem;">Loading incidents…</div>
+      </div>
+
+      <div class="alerts-table-wrap">
+        <h4 style="font-family:var(--font-display); font-size:0.9rem; padding:14px 16px 0;">Daily Breakdown (<span id="reports-table-days">30</span> hari)</h4>
+        <div id="reports-daily-table" style="max-height:340px; overflow-y:auto;">
           <div style="padding:20px; text-align:center; color:var(--text-muted);">Loading historical data…</div>
         </div>
       </div>
     `;
-    loadReportsData();
+
+    // Wire range toggle
+    setTimeout(() => {
+      document.querySelectorAll('#reports-range-filter .btn-filter').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('#reports-range-filter .btn-filter').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          loadReportsData(parseInt(btn.dataset.range, 10) || 30);
+        });
+      });
+    }, 0);
+
+    loadReportsData(30);
   } else if (view === 'settings') {
     titleEl.textContent = 'System & InfluxDB Configuration';
     subtitleEl.textContent = 'Dynamic Time-Series Database parameters, tokens, and Telegraf poller settings';
@@ -4565,103 +4656,280 @@ async function loadActivityEvents(deviceId = 'all', severity = 'all', search = '
 /**
  * Load data riil untuk Reports view dari endpoint /api/reports/sla
  */
-async function loadReportsData() {
+const REPORT_SLA_TARGET = 99.5;
+
+/** Warna status uptime (konsisten dengan strip header & legend report). */
+function slaPctColor(pct) {
+  if (pct === null || pct === undefined) return '#94a3b8';
+  return pct >= REPORT_SLA_TARGET ? '#10b981' : (pct >= 95 ? '#f59e0b' : '#ef4444');
+}
+
+/**
+ * Report SLA (halaman Reports): kumpulkan data rentang terpilih dari
+ * /api/reports/sla?days=N, isi kartu ringkas, render Chart.js bar per hari,
+ * ringkasan insiden rentang, dan tabel breakdown. Data di-cache ke
+ * state.reportsSlaData untuk exportSlaCsv.
+ */
+async function loadReportsData(days = 30) {
+  state.reportsRange = days;
   try {
-    const res = await fetch('/api/reports/sla').then(r => r.json());
+    const res = await fetch(`/api/reports/sla?days=${days}`).then(r => r.json());
     if (!res.success) return;
+    state.reportsSlaData = res;
 
+    const breakdown = res.daily_breakdown || [];
+    const known = breakdown.filter(d => d.uptime_percentage !== null);
+
+    // --- Kartu ringkas ---
     const slaText = document.getElementById('reports-sla-text');
-    const sourceEl = document.getElementById('reports-source');
-    const ingestionEl = document.getElementById('reports-ingestion');
-    const ingestionSrc = document.getElementById('reports-ingestion-src');
-    const latEl = document.getElementById('reports-avg-latency');
-    const latSrc = document.getElementById('reports-latency-src');
-    const lossEl = document.getElementById('reports-avg-loss');
-    const lossSrc = document.getElementById('reports-loss-src');
-
     if (slaText) {
-      const fromDb = res.daily_breakdown && res.daily_breakdown.length > 0;
-      if (fromDb) {
-        const pct = parseFloat(res.sla_30d);
-        slaText.textContent = `${isFinite(pct) ? pct.toFixed(2) : '0.00'}%`;
-        slaText.style.color = pct >= 99 ? 'var(--color-online)' : (pct >= 95 ? 'var(--color-warning)' : 'var(--color-offline)');
-      } else {
-        slaText.textContent = 'Not enough historical data';
+      const pct = parseFloat(res.sla_range);
+      if (known.length === 0 || !isFinite(pct)) {
+        slaText.textContent = 'No data';
         slaText.style.color = 'var(--text-muted)';
-      }
-    }
-    if (sourceEl) {
-      const fromDb = res.daily_breakdown && res.daily_breakdown.length > 0;
-      sourceEl.textContent = fromDb
-        ? `Aggregated from ${res.daily_breakdown.length} day(s) of daily_uptime records (sourced from InfluxDB ping probes)`
-        : 'History belum terisi — menunggu minimal 1 hari data ping di InfluxDB';
-    }
-    if (ingestionEl) {
-      ingestionEl.textContent = res.influx_has_ingestion
-        ? Number(res.total_ingestion_24h).toLocaleString('id-ID')
-        : '--';
-    }
-    if (ingestionSrc) {
-      ingestionSrc.textContent = res.influx_has_ingestion
-        ? 'Source: InfluxDB count() over last 24h'
-        : 'No InfluxDB ingestion data';
-    }
-    if (latEl) {
-      latEl.textContent = `${parseFloat(res.avg_latency_ms).toFixed(2)} ms`;
-    }
-    if (latSrc) {
-      latSrc.textContent = res.influx_has_data
-        ? 'Source: InfluxDB mean() over last 24h'
-        : 'Source: live devices.ping_latency average';
-    }
-    if (lossEl) {
-      lossEl.textContent = `${parseFloat(res.avg_packet_loss).toFixed(3)} %`;
-    }
-    if (lossSrc) {
-      lossSrc.textContent = res.influx_has_data
-        ? 'Source: InfluxDB mean() over last 24h'
-        : 'Source: live devices.packet_loss average';
-    }
-
-    // Daily table
-    const tableEl = document.getElementById('reports-daily-table');
-    if (tableEl) {
-      if (!res.daily_breakdown || res.daily_breakdown.length === 0) {
-        tableEl.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Belum ada riwayat harian. Riwayat terisi otomatis dari data ping InfluxDB setelah Telegraf berjalan minimal 1 hari.</div>';
       } else {
-        const rows = res.daily_breakdown.slice().reverse().map(d => {
-          const dt = new Date(d.date);
-          const dateLabel = dt.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
-          const pct = parseFloat(d.uptime_percentage);
-          const color = pct >= 99 ? 'var(--color-online)' : (pct >= 95 ? 'var(--color-warning)' : 'var(--color-offline)');
-          return `
-            <tr style="border-bottom:1px solid var(--border-subtle);">
-              <td style="padding:10px 14px; font-family:var(--font-mono); font-size:0.8rem;">${dateLabel}</td>
-              <td style="padding:10px 14px; font-family:var(--font-mono); font-size:0.8rem; text-align:right;">${d.total_checks.toLocaleString('id-ID')}</td>
-              <td style="padding:10px 14px; font-family:var(--font-mono); font-size:0.8rem; text-align:right;">${d.successful_checks.toLocaleString('id-ID')}</td>
-              <td style="padding:10px 14px; font-family:var(--font-mono); font-size:0.85rem; text-align:right; color:${color}; font-weight:600;">${pct.toFixed(2)}%</td>
-            </tr>
-          `;
-        }).join('');
-
-        tableEl.innerHTML = `
-          <table style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
-            <thead style="position:sticky; top:0; background:var(--bg-surface); z-index:1;">
-              <tr style="border-bottom:1px solid var(--border-subtle); color:var(--text-muted);">
-                <th style="padding:10px 14px;">Date</th>
-                <th style="padding:10px 14px; text-align:right;">Total Checks</th>
-                <th style="padding:10px 14px; text-align:right;">Successful</th>
-                <th style="padding:10px 14px; text-align:right;">Uptime</th>
-              </tr>
-            </thead>
-            <tbody>${rows}</tbody>
-          </table>
-        `;
+        slaText.textContent = `${pct.toFixed(2)}%`;
+        slaText.style.color = pct >= REPORT_SLA_TARGET ? 'var(--color-online)' : (pct >= 95 ? 'var(--color-warning)' : 'var(--color-offline)');
       }
     }
-  } catch (err) {
-    console.error('Failed to load reports data:', err);
+    const sourceEl = document.getElementById('reports-source');
+    if (sourceEl) {
+      sourceEl.textContent = known.length > 0
+        ? `rata-rata ${known.length}/${days} hari berdata (probe InfluxDB)`
+        : 'menunggu minimal 1 hari data ping penuh di InfluxDB';
+    }
+    const daysEl = document.getElementById('reports-data-days');
+    if (daysEl) daysEl.textContent = `${known.length}/${days}`;
+    const daysSrcEl = document.getElementById('reports-data-days-src');
+    if (daysSrcEl) {
+      daysSrcEl.textContent = known.length < days
+        ? `${days - known.length} hari tanpa sampel (Telegraf tidak berjalan)`
+        : 'rentang lengkap terisi data';
+    }
+
+    const totalChecksEl = document.getElementById('reports-total-checks');
+    if (totalChecksEl) totalChecksEl.textContent = Number(res.total_checks_range || 0).toLocaleString('id-ID');
+    const checksLabel = document.getElementById('reports-total-checks-label');
+    if (checksLabel) checksLabel.textContent = `Total Checks (${days}d)`;
+    const ingestSrc = document.getElementById('reports-ingestion-src');
+    if (ingestSrc) {
+      ingestSrc.textContent = res.influx_has_ingestion
+        ? `ingestion 24h: ${Number(res.total_ingestion_24h).toLocaleString('id-ID')}`
+        : 'ingestion 24h: no InfluxDB data';
+    }
+
+    const failedEl = document.getElementById('reports-failed-checks');
+    if (failedEl) {
+      failedEl.textContent = Number(res.failed_checks_range || 0).toLocaleString('id-ID');
+      failedEl.style.color = res.failed_checks_range > 0 ? 'var(--color-offline)' : 'var(--text-primary)';
+    }
+    const failedLabel = document.getElementById('reports-failed-label');
+    if (failedLabel) failedLabel.textContent = `Failed Checks (${days}d)`;
+    const latInline = document.getElementById('reports-avg-latency-src-inline');
+    if (latInline) latInline.textContent = `~${parseFloat(res.avg_latency_ms).toFixed(2)} ms`;
+    const lossInline = document.getElementById('reports-avg-loss-src-inline');
+    if (lossInline) lossInline.textContent = `~${parseFloat(res.avg_packet_loss).toFixed(2)}%`;
+
+    renderReportsChart(breakdown, days);
+    renderReportsIncidents(days);
+    renderReportsTable(breakdown, days);
+
+  } catch (e) {
+    const slaText = document.getElementById('reports-sla-text');
+    if (slaText) slaText.textContent = 'Error';
+    console.error('[loadReportsData] failed:', e);
   }
+}
+
+/**
+ * Chart.js bar per hari (grafik uptime rentang) + garis target SLA 99.5%.
+ */
+function renderReportsChart(breakdown, days) {
+  const ctx = document.getElementById('reports-sla-chart');
+  if (!ctx || !Array.isArray(breakdown)) return;
+
+  if (state.charts.reportsSla) {
+    state.charts.reportsSla.destroy();
+    state.charts.reportsSla = null;
+  }
+
+  const dateLabels = breakdown.map(d => {
+    const dt = new Date(d.date + 'T00:00:00');
+    return dt.toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit' });
+  });
+  const values = breakdown.map(d => d.uptime_percentage === null ? 1 : d.uptime_percentage); // hari kosong = ghost bar 1px agar tetap bisa di-hover
+  const colors = breakdown.map(d => slaPctColor(d.uptime_percentage));
+
+  state.charts.reportsSla = new Chart(ctx, {
+    data: {
+      labels: dateLabels,
+      datasets: [
+        {
+          type: 'bar',
+          label: 'Uptime %',
+          data: values,
+          backgroundColor: colors.map((c, i) => c === '#94a3b8' ? 'rgba(148, 163, 184, 0.28)' : c),
+          borderRadius: 3,
+          borderSkipped: false,
+          barPercentage: 0.8,
+          categoryPercentage: 0.9
+        },
+        {
+          type: 'line',
+          label: `Target SLA ${REPORT_SLA_TARGET}%`,
+          data: breakdown.map(() => REPORT_SLA_TARGET),
+          borderColor: 'rgba(37, 150, 190, 0.55)',
+          borderDash: [6, 5],
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        y: {
+          min: 0,
+          max: 100,
+          ticks: { color: '#7d8ea3', font: { size: 10 } },
+          grid: { color: 'rgba(255,255,255,0.05)' }
+        },
+        x: {
+          ticks: {
+            color: '#7d8ea3',
+            font: { size: 10 },
+            maxRotation: 0,
+            autoSkip: true,
+            maxTicksLimit: 15
+          },
+          grid: { display: false }
+        }
+      },
+      plugins: {
+        legend: { display: true, labels: { color: '#7d8ea3', font: { size: 10 }, boxWidth: 10, boxHeight: 10 } },
+        tooltip: {
+          titleFont: { size: 11 },
+          bodyFont: { size: 11 },
+          callbacks: {
+            title: (items) => {
+              const d = breakdown[items[0].dataIndex];
+              const dt = new Date(d.date + 'T00:00:00');
+              return dt.toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+            },
+            label: (item) => {
+              if (item.dataset.type === 'line') return null;
+              const d = breakdown[item.dataIndex];
+              if (d.uptime_percentage === null) return 'No data (Telegraf tidak berjalan)';
+              return `${d.uptime_percentage}% uptime — ${d.successful_checks.toLocaleString('id-ID')}/${d.total_checks.toLocaleString('id-ID')} checks`;
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+/**
+ * Ringkasan insiden dalam rentang (dari state incidentHistory + aktif).
+ */
+function renderReportsIncidents(days) {
+  const el = document.getElementById('reports-incidents');
+  if (!el) return;
+  const daysTitle = document.getElementById('reports-inc-days');
+  if (daysTitle) daysTitle.textContent = `(≤${days} hari)`;
+
+  const since = Date.now() - days * 86400000;
+  const all = [...(state.activeIncidents || []), ...(state.incidentHistory || [])];
+  const inRange = all.filter(i => {
+    const t = new Date(i.startedAt).getTime();
+    return isFinite(t) && t >= since;
+  });
+
+  if (inRange.length === 0) {
+    el.innerHTML = '<div style="color:var(--text-muted); padding:8px 4px;">Tidak ada insiden dalam rentang ini.</div>';
+    return;
+  }
+
+  const critCount = inRange.filter(i => i.currentSeverity === 'critical').length;
+  const activeCount = inRange.filter(i => i.status === 'active').length;
+  const summary = `<div style="margin-bottom:10px; color:var(--text-secondary);">
+      Total <b style="color:var(--text-primary);">${inRange.length}</b> insiden
+      · <span style="color:var(--color-offline);">${critCount} critical</span>
+      · <span style="color:var(--color-warning);">${activeCount} masih aktif</span>
+    </div>`;
+
+  const rows = inRange
+    .sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))
+    .slice(0, 6)
+    .map(i => {
+      const sevColor = i.currentSeverity === 'critical' ? 'var(--color-offline)' : (i.currentSeverity === 'warning' ? 'var(--color-warning)' : 'var(--color-online)');
+      const dt = new Date(i.startedAt).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+      const status = i.status === 'resolved'
+        ? '<span style="color:var(--color-online);">resolved</span>'
+        : '<span style="color:var(--color-warning);">active</span>';
+      return `<div style="display:grid; grid-template-columns:110px 90px minmax(0,1fr) 70px; gap:10px; padding:7px 4px; border-bottom:1px solid var(--border-subtle); align-items:baseline;">
+          <span style="font-family:var(--font-mono); color:var(--text-muted); font-size:0.68rem;">${dt}</span>
+          <span style="color:${sevColor}; font-weight:600; font-size:0.72rem; text-transform:uppercase;">${i.currentSeverity || 'info'}</span>
+          <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${(i.rootCause && i.rootCause.message) || 'Incident'} — <span style="color:var(--text-muted);">${i.deviceName || ''}</span></span>
+          <span style="text-align:right; font-size:0.72rem;">${status}</span>
+        </div>`;
+    }).join('');
+
+  el.innerHTML = summary + rows;
+}
+
+/**
+ * Tabel Daily Breakdown rentang terpilih; hari tanpa data tampil pucat.
+ */
+function renderReportsTable(breakdown, days) {
+  const tableEl = document.getElementById('reports-daily-table');
+  const labelEl = document.getElementById('reports-table-days');
+  if (labelEl) labelEl.textContent = String(days);
+  if (!tableEl || !Array.isArray(breakdown)) return;
+
+  const rows = breakdown.slice().reverse().map(d => {
+    const dt = new Date(d.date + 'T00:00:00');
+    const dateLabel = dt.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
+    if (d.uptime_percentage === null) {
+      return `<tr style="border-bottom:1px solid var(--border-subtle); opacity:0.55;">
+          <td style="padding:8px 14px; font-family:var(--font-mono); font-size:0.78rem;">${dateLabel}</td>
+          <td style="padding:8px 14px; text-align:right; color:var(--text-muted); font-size:0.75rem;">no data</td>
+          <td style="padding:8px 14px; text-align:right; color:var(--text-muted); font-size:0.75rem;">—</td>
+          <td style="padding:8px 14px; text-align:right; color:var(--text-muted); font-size:0.75rem;">—</td>
+          <td style="padding:8px 14px; text-align:right; color:var(--text-muted); font-size:0.75rem;">—</td>
+        </tr>`;
+    }
+    const pct = d.uptime_percentage;
+    const color = slaPctColor(pct);
+    const failed = Math.max(0, d.total_checks - d.successful_checks);
+    return `
+      <tr style="border-bottom:1px solid var(--border-subtle);">
+        <td style="padding:8px 14px; font-family:var(--font-mono); font-size:0.78rem;">${dateLabel}</td>
+        <td style="padding:8px 14px; font-family:var(--font-mono); font-size:0.78rem; text-align:right;">${d.total_checks.toLocaleString('id-ID')}</td>
+        <td style="padding:8px 14px; font-family:var(--font-mono); font-size:0.78rem; text-align:right; color:var(--color-online);">${d.successful_checks.toLocaleString('id-ID')}</td>
+        <td style="padding:8px 14px; font-family:var(--font-mono); font-size:0.78rem; text-align:right; color:var(--color-offline);">${failed > 0 ? failed.toLocaleString('id-ID') : '0'}</td>
+        <td style="padding:8px 14px; font-family:var(--font-mono); font-size:0.82rem; text-align:right; color:${color}; font-weight:600;">${pct.toFixed(2)}%</td>
+      </tr>
+    `;
+  }).join('');
+
+  tableEl.innerHTML = `
+    <table style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
+      <thead style="position:sticky; top:0; background:var(--bg-surface); z-index:1;">
+        <tr style="border-bottom:1px solid var(--border-subtle); color:var(--text-muted);">
+          <th style="padding:10px 14px; font-size:0.65rem; text-transform:uppercase;">Date</th>
+          <th style="padding:10px 14px; font-size:0.65rem; text-transform:uppercase; text-align:right;">Total Checks</th>
+          <th style="padding:10px 14px; font-size:0.65rem; text-transform:uppercase; text-align:right;">Successful</th>
+          <th style="padding:10px 14px; font-size:0.65rem; text-transform:uppercase; text-align:right;">Failed</th>
+          <th style="padding:10px 14px; font-size:0.65rem; text-transform:uppercase; text-align:right;">Uptime %</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
 }
 
 window.loadReportsData = loadReportsData;
@@ -5281,17 +5549,31 @@ window.openAddDevicePrefilled = openAddDevicePrefilled;
  */
 window.exportSlaCsv = async function() {
   try {
-    const res = await fetch('/api/reports/sla').then(r => r.json());
-    if (!res.success) return;
+    // Prioritas data yang sudah dimuat halaman (rentang aktif);
+    // fallback fetch 30 hari bila halaman Reports belum dibuka.
+    let res = state.reportsSlaData;
+    if (!res || !res.success) {
+      res = await fetch(`/api/reports/sla?days=${state.reportsRange || 30}`).then(r => r.json());
+      if (!res.success) return;
+      state.reportsSlaData = res;
+    }
+    const days = res.window_days || state.reportsRange || 30;
 
-    const lines = ['Date,Total Checks,Successful Checks,Uptime Percentage'];
+    const lines = [`Date,Total Checks,Successful Checks,Failed Checks,Uptime Percentage`];
     (res.daily_breakdown || []).forEach(d => {
-      const date = new Date(d.date).toISOString().split('T')[0];
-      lines.push(`${date},${d.total_checks},${d.successful_checks},${d.uptime_percentage}`);
+      const date = new Date(d.date + 'T00:00:00').toISOString().split('T')[0];
+      const failed = d.uptime_percentage === null ? '' : Math.max(0, d.total_checks - d.successful_checks);
+      const u = d.uptime_percentage === null ? 'NO_DATA' : d.uptime_percentage;
+      lines.push(`${date},${d.total_checks},${d.successful_checks},${failed},${u}`);
     });
     lines.push('');
     lines.push(`# Summary`);
-    lines.push(`# 30-Day SLA,${res.sla_30d}%`);
+    const known = (res.daily_breakdown || []).filter(d => d.uptime_percentage !== null);
+    lines.push(`# Window,${days} days`);
+    lines.push(`# Data Days,${known.length}/${days}`);
+    lines.push(`# Avg SLA,${res.sla_range}%`);
+    lines.push(`# Total Checks (range),${res.total_checks_range}`);
+    lines.push(`# Failed Checks (range),${res.failed_checks_range}`);
     lines.push(`# Total Ingestion (24h),${res.total_ingestion_24h}`);
     lines.push(`# Avg Latency (ms),${res.avg_latency_ms}`);
     lines.push(`# Avg Packet Loss (%),${res.avg_packet_loss}`);
@@ -5302,7 +5584,7 @@ window.exportSlaCsv = async function() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `bms-it-monitoring-sla-30d-${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = `itnetmon-sla-${days}d-${new Date().toISOString().split('T')[0]}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

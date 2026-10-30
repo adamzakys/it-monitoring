@@ -210,19 +210,39 @@ router.get('/kpi', async (req, res) => {
 
     try {
       const upRes = await db.query(
-        `SELECT date, uptime_percentage FROM daily_uptime
+        `SELECT date, uptime_percentage, total_checks, successful_checks FROM daily_uptime
          WHERE date >= date('now', '-30 days')
          ORDER BY date ASC`
       );
-      if (upRes.rows.length > 0) {
-        dailyBreakdown = upRes.rows.map(r => ({
-          date: pgDateToStr(r.date),
-          pct: parseFloat(r.uptime_percentage)
-        }));
-        trendline = dailyBreakdown.map(d => d.pct);
-        const sum = dailyBreakdown.reduce((acc, d) => acc + d.pct, 0);
-        uptime30d = parseFloat((sum / dailyBreakdown.length).toFixed(2));
-      } else {
+      // B6: FILL window 30 hari kalender penuh. Hari tanpa sampel ping
+      // (Telegraf mati / belum ada data) ditandai pct=null — BUKAN di-skip.
+      // Tanpa fill ini, sparkline memampatkan hari bolong sehingga dua hari
+      // yang terpisah berminggu-minggu terlihat seperti bertetangga.
+      const byDate = new Map();
+      for (const r of upRes.rows) {
+        byDate.set(String(r.date).slice(0, 10), r);
+      }
+      const filled = [];
+      for (let i = 29; i >= 0; i--) {
+        const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+        const row = byDate.get(d);
+        filled.push({
+          date: d,
+          pct: row ? parseFloat(row.uptime_percentage) : null,
+          total_checks: row ? Math.round(row.total_checks) : 0,
+          successful_checks: row ? Math.round(row.successful_checks) : 0
+        });
+      }
+      dailyBreakdown = filled;
+      // SLA 30d: rata-rata hanya hari yang punya data (hari tanpa sampel
+      // tidak dihitung 0% maupun 100% — tidak tahu kondisi sebenarnya).
+      const known = filled.filter(f => f.pct !== null);
+      if (known.length > 0) {
+        trendline = known.map(d => d.pct);
+        const sum = known.reduce((acc, d) => acc + d.pct, 0);
+        uptime30d = parseFloat((sum / known.length).toFixed(2));
+      }
+      if (dailyBreakdown.length === 0) {
         uptime30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
         trendline = [];
       }
@@ -236,13 +256,65 @@ router.get('/kpi', async (req, res) => {
       uptime_30d: uptime30d,
       trendline,
       daily_breakdown: dailyBreakdown,
-      sla_data_days: dailyBreakdown.length,
+      sla_data_days: dailyBreakdown.filter(d => d.pct !== null).length,
       total_devices: total,
       online_count: online,
       offline_count: offline,
       warning_count: warning,
       db_connected: false, // SQLite mode
       last_updated: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: safeError(err) });
+  }
+});
+
+// GET /api/uptime/days?days=30 — B6 fondasi Report dashboard:
+// deret uptime harian yang DIISI penuh per kalender (pct=null = hari tanpa
+// sampel), plus nama device-level opsional lewat ?device_id=.
+router.get('/uptime/days', async (req, res) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
+    const deviceId = req.query.device_id ? parseInt(req.query.device_id, 10) : null;
+
+    const upRes = await db.query(
+      `SELECT date, uptime_percentage, total_checks, successful_checks
+         FROM daily_uptime WHERE date >= date('now', ?)
+        ORDER BY date ASC`,
+      [`-${days} days`]
+    );
+    const byDate = new Map();
+    for (const r of upRes.rows) {
+      byDate.set(String(r.date).slice(0, 10), r);
+    }
+
+    const series = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+      const row = byDate.get(d);
+      let pct = row ? parseFloat(row.uptime_percentage) : null;
+      // Hari terisi selalu lebih ewe — clamp [0..100].
+      if (pct !== null) pct = Math.max(0, Math.min(100, pct));
+      series.push({
+        date: d,
+        pct,
+        total_checks: row ? Math.round(row.total_checks) : 0,
+        successful_checks: row ? Math.round(row.successful_checks) : 0
+      });
+    }
+
+    const known = series.filter(s => s.pct !== null);
+    const avg = known.length > 0
+      ? parseFloat((known.reduce((acc, s) => acc + s.pct, 0) / known.length).toFixed(2))
+      : null;
+
+    res.json({
+      success: true,
+      window_days: days,
+      device_id: deviceId, // di-reserve: per-device breakdown butuh data ping per device di InfluxDB
+      data_days: known.length,
+      avg_uptime: avg,
+      days: series
     });
   } catch (err) {
     res.status(500).json({ success: false, error: safeError(err) });
@@ -1450,6 +1522,9 @@ router.get('/live-feed', async (req, res) => {
 // 4c. Reports - SLA & agregat 30 hari (data riil dari daily_uptime + InfluxDB)
 router.get('/reports/sla', async (req, res) => {
   try {
+    // Rentang fleksibel (Report SLA upgrade): ?days=7|14|30|90+ selain 30.
+    const windowDays = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
+
     // Seed daily_uptime dari data ping InfluxDB sebelum membaca tabel
     try {
       await uptimeService.ensureDailyUptime();
@@ -1462,8 +1537,9 @@ router.get('/reports/sla', async (req, res) => {
       const r = await db.query(
         `SELECT date, total_checks, successful_checks, uptime_percentage
          FROM daily_uptime
-         WHERE date >= date('now', '-30 days')
-         ORDER BY date ASC`
+         WHERE date >= date('now', ?)
+         ORDER BY date ASC`,
+        [`-${windowDays} days`]
       );
       daily = r.rows.map(row => ({
         date: pgDateToStr(row.date),
@@ -1475,21 +1551,37 @@ router.get('/reports/sla', async (req, res) => {
       daily = [];
     }
 
-    // Hitung SLA 30 hari riil
-    let sla30d = 100;
-    if (daily.length > 0) {
-      const sum = daily.reduce((acc, d) => acc + d.uptime_percentage, 0);
-      sla30d = parseFloat((sum / daily.length).toFixed(2));
+    // Fill window kalender penuh (pola B6): hari tanpa sampel = pct null,
+    // sehingga grafik tidak memampatkan hari bolong menjadi bertetangga.
+    const byDate = new Map(daily.map(d => [d.date, d]));
+    const filled = [];
+    for (let i = windowDays - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+      const row = byDate.get(d);
+      filled.push(row || {
+        date: d,
+        total_checks: 0,
+        successful_checks: 0,
+        uptime_percentage: null
+      });
+    }
+
+    // SLA rentang: rata-rata hanya hari yang punya data (bolong tak dihitung).
+    const known = filled.filter(d => d.uptime_percentage !== null);
+    let slaRange = null;
+    if (known.length > 0) {
+      const sum = known.reduce((acc, d) => acc + d.uptime_percentage, 0);
+      slaRange = parseFloat((sum / known.length).toFixed(2));
     } else {
       // fallback: hitung dari device status saat ini
       const devRes = await db.query('SELECT status FROM devices');
       const devices = devRes.rows;
       const total = devices.length;
       const online = devices.filter(d => d.status === 'online').length;
-      sla30d = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
+      slaRange = total === 0 ? 100 : parseFloat(((online / total) * 100).toFixed(2));
     }
 
-    // Total ingestion points (24h) dari InfluxDB riil, only if available
+    // KPI 24h tetap dilaporkan (ingestion, latency, loss) — sumbernya sama.
     let ingestion24h = 0;
     let influx_has_ingestion = false;
     try {
@@ -1516,10 +1608,21 @@ router.get('/reports/sla', async (req, res) => {
       }
     }
 
+    // Statistik agregat rentang untuk kartu ringkas report.
+    const totalChecksRange = known.reduce((s, d) => s + d.total_checks, 0);
+    const failedChecksRange = known.reduce((s, d) => s + Math.max(0, d.total_checks - d.successful_checks), 0);
+
     res.json({
       success: true,
-      sla_30d: sla30d,
-      daily_breakdown: daily,
+      window_days: windowDays,
+      // sla_30d dipertahankan utk backward-compat (exportSlaCsv lama & kpi);
+      // komposisi/_nilainya kini = SLA rentang terpilih.
+      sla_30d: slaRange,
+      sla_range: slaRange,
+      data_days: known.length,
+      total_checks_range: totalChecksRange,
+      failed_checks_range: failedChecksRange,
+      daily_breakdown: filled,
       total_ingestion_24h: ingestion24h,
       influx_has_ingestion: influx_has_ingestion,
       avg_latency_ms: summary.avg_latency_ms,
@@ -1570,17 +1673,21 @@ router.post('/reports/sla/reset', async (req, res) => {
 // Phase 1: never return the actual InfluxDB token in the response.
 // The frontend is expected to leave the token field empty to keep the
 // current value, and only supply a new token when rotating.
+// A2: settings kini PERSISTEN di tabel app_settings (di-load ke process.env
+// saat boot oleh db.loadAppSettings). .env tetap jadi default; nilai yang
+// disimpan lewat UI selalu menang setelah proses apa pun direstart.
 router.get('/settings', (req, res) => {
-  const store = db.getMemoryStore();
-  // Build a sanitized copy of the settings object. Anything that looks
-  // like a credential is replaced with a sentinel string.
-  const safeSettings = Object.assign({}, store.settings);
-  if (safeSettings.INFLUX_TOKEN) {
-    // Preserve length info for UX but do NOT reveal the actual value.
-    const len = String(safeSettings.INFLUX_TOKEN).length;
-    safeSettings.INFLUX_TOKEN = '__KEEP_CURRENT__'; // sentinel; frontend will mask
-    safeSettings.INFLUX_TOKEN_LENGTH = len;
-  }
+  // Sanitasi: token tak pernah dikirim balik ke browser. Frontend diharapkan
+  // mengirim '__KEEP_CURRENT__' agar token lama tetap terpakai saat rotate.
+  const safeSettings = {
+    INFLUX_URL: process.env.INFLUX_URL || '',
+    INFLUX_TOKEN: '__KEEP_CURRENT__',
+    INFLUX_TOKEN_LENGTH: process.env.INFLUX_TOKEN ? String(process.env.INFLUX_TOKEN).length : 0,
+    INFLUX_ORG: process.env.INFLUX_ORG || 'itnetmon',
+    INFLUX_BUCKET: process.env.INFLUX_BUCKET || 'itnetmon_metrics',
+    TELEGRAF_CONF_DIR: process.env.TELEGRAF_CONF_DIR || './telegraf.d',
+    TELEGRAF_RELOAD_CMD: process.env.TELEGRAF_RELOAD_CMD || 'echo "Reloading Telegraf"'
+  };
   res.json({
     success: true,
     settings: safeSettings,
@@ -1591,46 +1698,39 @@ router.get('/settings', (req, res) => {
 
 router.post('/settings', (req, res) => {
   const { INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET, TELEGRAF_CONF_DIR } = req.body;
-  const store = db.getMemoryStore();
 
   let tokenChanged = false;
-  if (INFLUX_URL) store.settings.INFLUX_URL = INFLUX_URL;
-  // Phase 1: treat the sentinel value from GET as a no-op so the frontend
-  // can submit a "leave current token" form without rotating the secret.
+  // Hanya kolom yang benar-benar dikirim (truthy) yang dioverride — form
+  // parsial tidak mereset kolom lain ke kosong.
+  const updates = {};
+  if (INFLUX_URL) updates.INFLUX_URL = INFLUX_URL;
+  // Phase 1: '__KEEP_CURRENT__' / '' berarti "pertahankan token lama".
   if (
     INFLUX_TOKEN !== undefined &&
     INFLUX_TOKEN !== null &&
     INFLUX_TOKEN !== '' &&
     INFLUX_TOKEN !== '__KEEP_CURRENT__' &&
-    store.settings.INFLUX_TOKEN !== INFLUX_TOKEN
+    INFLUX_TOKEN !== process.env.INFLUX_TOKEN
   ) {
-    store.settings.INFLUX_TOKEN = INFLUX_TOKEN;
+    updates.INFLUX_TOKEN = INFLUX_TOKEN;
     tokenChanged = true;
   }
-  if (INFLUX_ORG) store.settings.INFLUX_ORG = INFLUX_ORG;
-  if (INFLUX_BUCKET) store.settings.INFLUX_BUCKET = INFLUX_BUCKET;
-  if (TELEGRAF_CONF_DIR) store.settings.TELEGRAF_CONF_DIR = TELEGRAF_CONF_DIR;
+  if (INFLUX_ORG) updates.INFLUX_ORG = INFLUX_ORG;
+  if (INFLUX_BUCKET) updates.INFLUX_BUCKET = INFLUX_BUCKET;
+  if (TELEGRAF_CONF_DIR) updates.TELEGRAF_CONF_DIR = TELEGRAF_CONF_DIR;
 
-  // Sync process.env agar ensureConfDir() pakai token baru
-  if (INFLUX_URL) process.env.INFLUX_URL = INFLUX_URL;
-  if (
-    INFLUX_TOKEN !== undefined &&
-    INFLUX_TOKEN !== null &&
-    INFLUX_TOKEN !== '' &&
-    INFLUX_TOKEN !== '__KEEP_CURRENT__'
-  ) {
-    process.env.INFLUX_TOKEN = INFLUX_TOKEN;
+  // A2: persist ke app_settings (upsert per kolom) — saveAppSetting juga
+  // menyinkronkan process.env sehingga runtime & boot berikutnya konsisten.
+  for (const [key, value] of Object.entries(updates)) {
+    db.saveAppSetting(key, value);
   }
-  if (INFLUX_ORG) process.env.INFLUX_ORG = INFLUX_ORG;
-  if (INFLUX_BUCKET) process.env.INFLUX_BUCKET = INFLUX_BUCKET;
 
   // Jika token InfluxDB berubah, rewrite 00-output.conf Telegraf
   if (tokenChanged) {
     try {
       telegrafManager.refreshOutputConfig();
       telegrafManager.triggerReload();
-      // Force refresh InfluxDB client with new token
-      const influxService = require('../services/influxService');
+      // Force refresh InfluxDB client dengan token baru
       influxService.resetClient();
       console.log('[Settings] InfluxDB token updated → 00-output.conf rewritten, Telegraf reload triggered, InfluxDB client refreshed');
     } catch (e) {
@@ -1639,12 +1739,14 @@ router.post('/settings', (req, res) => {
   }
 
   // Phase 1: never echo the actual token back in the POST response either.
-  const safeSettings = Object.assign({}, store.settings);
-  if (safeSettings.INFLUX_TOKEN) {
-    const len = String(safeSettings.INFLUX_TOKEN).length;
-    safeSettings.INFLUX_TOKEN = '__KEEP_CURRENT__';
-    safeSettings.INFLUX_TOKEN_LENGTH = len;
-  }
+  const safeSettings = {
+    INFLUX_URL: process.env.INFLUX_URL || '',
+    INFLUX_TOKEN: '__KEEP_CURRENT__',
+    INFLUX_TOKEN_LENGTH: process.env.INFLUX_TOKEN ? String(process.env.INFLUX_TOKEN).length : 0,
+    INFLUX_ORG: process.env.INFLUX_ORG || 'itnetmon',
+    INFLUX_BUCKET: process.env.INFLUX_BUCKET || 'itnetmon_metrics',
+    TELEGRAF_CONF_DIR: process.env.TELEGRAF_CONF_DIR || './telegraf.d'
+  };
   res.json({
     success: true,
     message: 'Settings updated successfully.' + (tokenChanged ? ' Telegraf config synced.' : ''),
@@ -1660,9 +1762,11 @@ router.post('/settings/test-influx', async (req, res) => {
   // so the test reflects what production writes would use.
   const body = Object.assign({}, req.body || {});
   if (body.INFLUX_TOKEN === '__KEEP_CURRENT__' || body.INFLUX_TOKEN === '') {
-    const store = db.getMemoryStore();
-    if (store && store.settings && store.settings.INFLUX_TOKEN) {
-      body.INFLUX_TOKEN = store.settings.INFLUX_TOKEN;
+    // A2: token aktif kini tersimpan di app_settings / process.env (shim
+    // memori legacy selalu kosong setelah restart). process.env diisi
+    // loadAppSettings() saat boot dan saveAppSetting() saat POST /settings.
+    if (process.env.INFLUX_TOKEN) {
+      body.INFLUX_TOKEN = process.env.INFLUX_TOKEN;
     } else {
       // No token stored yet; report a clear, sanitized error.
       return res.json({

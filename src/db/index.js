@@ -165,6 +165,61 @@ function ensureColumn(table, column, definition) {
   ensureColumn('incidents', 'archived_at', 'TIMESTAMP');
   ensureColumn('incidents', 'archived_note', 'TEXT');
   ensureColumn('incidents', 'archived_by', 'VARCHAR(100)');
+
+  // A2: muat settings yang tersimpan di app_settings ke process.env agar
+  // perubahan config via UI bertahan lintas restart (prioritas di atas .env).
+  loadAppSettings();
+}
+
+/**
+ * A2: baca app_settings → process.env. Dipanggil di akhir initDB() sehingga
+ * nilai yang pernah disimpan lewat UI POST /settings selalu menang dibanding
+ * default .env saat server baru boot.
+ */
+function loadAppSettings() {
+  try {
+    const rows = db.prepare('SELECT key, value FROM app_settings').all();
+    for (const row of rows) {
+      process.env[row.key] = row.value;
+    }
+    if (rows.length > 0) {
+      console.log(`[DB] Loaded ${rows.length} persisted setting(s) from app_settings`);
+    }
+  } catch (err) {
+    console.warn('[DB] Failed to load app_settings:', err.message);
+  }
+}
+
+/**
+ * A2: simpan satu setting ke app_settings (upsert) + sinkron process.env.
+ * Kegagalan ditelan dengan log — POST /settings tidak harus 500 karena satu
+ * kolom gagal, tapi tetap tercatat di console.
+ */
+function saveAppSetting(key, value) {
+  try {
+    db.prepare(
+      `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`
+    ).run(key, value);
+    process.env[key] = value;
+    return true;
+  } catch (err) {
+    console.error(`[DB] Failed to save app_setting ${key}:`, err.message);
+    return false;
+  }
+}
+
+/** A2: ambil semua app_settings sebagai objek { key: value }. */
+function getAppSettings() {
+  try {
+    const rows = db.prepare('SELECT key, value FROM app_settings').all();
+    const out = {};
+    for (const row of rows) out[row.key] = row.value;
+    return out;
+  } catch (err) {
+    console.error('[DB] Failed to read app_settings:', err.message);
+    return {};
+  }
 }
 
 function query(sql, params = []) {
@@ -229,5 +284,8 @@ module.exports = {
   transaction,
   isPostgresConnected: () => false, // SQLite mode - no PostgreSQL
   getMemoryStore: () => compatStore, // Backward-compat: settings in-memory + koleksi kosong
+  loadAppSettings,
+  saveAppSetting,
+  getAppSettings,
   close
 };
